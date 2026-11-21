@@ -1,0 +1,8 @@
+<!-- Planning model for the real arm: SO-101 + the desk plane at z = 0 (no objects; the real scene is perceived). -->
+<mujoco model="real_desk">
+  <include file="so101_task_robot.xml"/>
+  <option timestep="0.002" integrator="implicitfast"/>
+  <worldbody>
+    <geom name="desk" type="plane" size="0 0 0.05" contype="1" conaffinity="1"/>
+  </worldbody>
+</mujoco>

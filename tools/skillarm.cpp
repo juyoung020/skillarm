@@ -5,6 +5,8 @@
 //   skillarm arm move <joint:target> ... [--speed steps_per_s]       path-check in MuJoCo, then move one joint
 //                                                                    at a time; the servo server stops on contact
 //   skillarm arm stream [seconds]
+//   skillarm arm clear                                              clear a latched servo-mode blockage fault
+//   skillarm run program.cpp [--task pick_cube] [--seeds ..] [--real] compile + run an agent program per seed
 // Real arm address: SKILLARM_ARM=host:port (default 100.115.242.117:7755).
 #include <algorithm>
 #include <chrono>
@@ -68,6 +70,7 @@ int arm_cmd(const std::vector<std::string>& a) {
     std::printf("%s\n", arm.call({{"cmd", "state"}}).dump().c_str());
     return 0;
   }
+  if (sub == "clear") { std::printf("%s\n", arm.call({{"cmd", "clear"}}).dump().c_str()); return 0; }
   if (sub == "torque" && a.size() >= 2) {
     std::vector<int> js;
     for (size_t i = 2; i < a.size(); ++i) js.push_back(std::stoi(a[i]));
@@ -146,7 +149,7 @@ int ik_test(int n) {
   return 0;
 }
 
-// skillarm run program.cpp [--task pick_cube] [--seeds 0,1,2] [--out runs/name]
+// skillarm run program.cpp [--task pick_cube] [--seeds 0,1,2] [--out runs/name] [--real]
 int run_cmd(const char* self, const std::vector<std::string>& a) {
   namespace fs = std::filesystem;
   const fs::path src = a[0];
@@ -156,6 +159,20 @@ int run_cmd(const char* self, const std::vector<std::string>& a) {
     if (a[i] == "--task") task = a[i + 1];
     if (a[i] == "--seeds") seeds_s = a[i + 1];
     if (a[i] == "--out") out = a[i + 1];
+    if (a[i] == "--real") --i;  // flag without a value
+  }
+  if (std::find(a.begin(), a.end(), "--real") != a.end()) {
+    // the real arm moves under the program: the operator must be at the arm
+    std::printf("REAL ARM: the program will move the SO-101. Stand at the arm with the power switch in reach.\n"
+                "Type 'start' to continue: ");
+    std::fflush(stdout);
+    char line[32] = {};
+    if (!std::fgets(line, sizeof line, stdin) || std::string(line).rfind("start", 0) != 0) {
+      std::printf("aborted\n");
+      return 1;
+    }
+    _putenv_s("SKILLARM_REAL", "1");
+    if (task == "pick_cube") task = "real_pick_cube";
   }
   const auto why = check_program_source(src);
   if (!why.empty()) { std::printf("program rejected: %s\n", why.c_str()); return 1; }

@@ -36,12 +36,12 @@ add_library(skillarm_harness
   src/api/api_impl.cpp
   src/runner/runner.cpp)
 target_include_directories(skillarm_harness PUBLIC third_party)
-target_link_libraries(skillarm_harness PUBLIC skillarm_kin)
+target_link_libraries(skillarm_harness PUBLIC skillarm_kin skillarm_real)
 target_compile_definitions(skillarm_harness PRIVATE SKILLARM_ROOT="${CMAKE_SOURCE_DIR}")
 
-add_library(skillarm_real src/real/arm_client.cpp)
+add_library(skillarm_real src/real/arm_client.cpp src/real/real_so101.cpp)
 target_include_directories(skillarm_real PUBLIC include src third_party)
-target_link_libraries(skillarm_real PUBLIC ws2_32)
+target_link_libraries(skillarm_real PUBLIC skillarm_core mujoco ws2_32)
 
 add_executable(skillarm tools/skillarm.cpp)
 target_link_libraries(skillarm PRIVATE skillarm_sim skillarm_kin skillarm_harness skillarm_real)

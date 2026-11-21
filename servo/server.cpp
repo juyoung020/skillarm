@@ -9,6 +9,9 @@
 //                                               all listed joints start and arrive together (linear in steps);
 //                                               speed = max steps/s of the slowest joint; reply when accepted,
 //                                               then {"ev":"move_done"} or {"ev":"move_aborted","reason":...}
+//   {"cmd":"servo","targets":{"1":2047,...}}   continuous mode for 30 Hz control: goals move towards the latest
+//                                               targets by at most 45 steps per 20 ms tick; holds after 500 ms silence
+//   {"cmd":"clear"}                             clear a latched servo-mode blockage fault
 //   {"cmd":"stop"}                              hold where the arm is now
 //
 // Safety, always on:
@@ -46,6 +49,8 @@ constexpr int N = 6;
 constexpr int kTickMs = 20;           // 50 Hz control / sampling
 constexpr int kLagSteps = 80, kLagTicks = 3, kLoadAbort = 600;
 constexpr uint16_t kTorqueLimit = 600;
+constexpr int kServoStep = 45;          // max goal change per 20 ms tick (~4 deg)
+constexpr int kServoTimeoutMs = 500;     // no servo command for this long -> hold
 
 struct Joint {
   uint8_t id;
@@ -62,6 +67,10 @@ struct Motion {
   std::array<double, N> from{}, to{};
   double t = 0, dur = 1;               // seconds
   std::array<int, N> lag{};
+  // continuous servo mode: the client streams targets (e.g. 30 Hz); goals approach them at most kServoStep per tick
+  bool servo = false;
+  std::array<int, N> target{}, goal{};
+  int64_t last_cmd_ms = 0;
 };
 
 struct Client { int fd; std::string in; int hz = 0; int64_t next_ms = 0; };
@@ -107,7 +116,7 @@ class Server {
       volt = std::max(volt, j.volt);
     }
     return {{"pos", pos}, {"speed", spd}, {"load", load}, {"temp", temp}, {"torque", tq}, {"volt", volt},
-            {"moving", m_.active}};
+            {"moving", m_.active}, {"servo", m_.active && m_.servo}, {"fault", fault_}};
   }
 
   // One sync read of 56..63 for all joints; per-joint read as fallback.
@@ -169,6 +178,34 @@ class Server {
     return {{"ok", true}, {"seconds", m_.dur}};
   }
 
+  // continuous servo mode: {"cmd":"servo","targets":{"1":2047,...}}
+  json servo(const json& targets, int owner) {
+    if (!fault_.empty()) return {{"error", "fault latched: " + fault_ + " (send {\"cmd\":\"clear\"} after checking the arm)"}};
+    if (m_.active && !m_.servo) return {{"error", "a move is running"}};
+    if (!m_.active) {
+      Motion m;
+      m.servo = true;
+      m.active = true;
+      m.owner = owner;
+      for (int k = 0; k < N; ++k) m.goal[k] = m.target[k] = j_[k].pos;
+      m_ = m;
+    }
+    m_.owner = owner;
+    m_.last_cmd_ms = ms_now();
+    for (auto& [k, v] : targets.items()) {
+      const int jn = std::stoi(k);
+      if (jn < 1 || jn > N) return {{"error", "joint " + k + " out of 1..6"}};
+      auto& j = j_[jn - 1];
+      if (!j.ok || j.pos < 0) return {{"error", "joint " + k + " not responding"}};
+      if (!m_.on[jn - 1]) { m_.on[jn - 1] = true; m_.goal[jn - 1] = j.pos; }
+      if (!j.torque) torque(true, {jn});
+      m_.target[jn - 1] = std::clamp(v.get<int>(), j.lo + 5, j.hi - 5);
+    }
+    return {{"ok", true}};
+  }
+
+  void clear_fault() { fault_.clear(); }
+
   // hold every joint where it is now
   void stop(const std::string& why) {
     std::vector<std::pair<uint8_t, std::vector<uint8_t>>> items;
@@ -186,6 +223,7 @@ class Server {
   void tick() {
     sample();
     if (!m_.active) return;
+    if (m_.servo) { servo_tick(); return; }
     m_.t += kTickMs / 1000.0;
     const double a = std::min(m_.t / m_.dur, 1.0);
     std::vector<std::pair<uint8_t, std::vector<uint8_t>>> items;
@@ -198,6 +236,7 @@ class Server {
       if (m_.lag[k] >= kLagTicks || std::abs(j_[k].load) > kLoadAbort) {
         char buf[160];
         std::snprintf(buf, sizeof buf, "joint %d blocked: goal %d, at %d, load %d", k + 1, goal, j_[k].pos, j_[k].load);
+        fault_ = buf;
         stop(buf);
         return;
       }
@@ -212,6 +251,25 @@ class Server {
         broadcast({{"ev", "move_done"}, {"settled", settled}, {"state", state()}});
       }
     }
+  }
+
+  void servo_tick() {
+    if (ms_now() - m_.last_cmd_ms > kServoTimeoutMs) { stop("servo timeout (no command for 500 ms)"); return; }
+    std::vector<std::pair<uint8_t, std::vector<uint8_t>>> items;
+    for (int k = 0; k < N; ++k) {
+      if (!m_.on[k]) continue;
+      m_.goal[k] += std::clamp(m_.target[k] - m_.goal[k], -kServoStep, kServoStep);
+      const int goal = m_.goal[k];
+      items.push_back({j_[k].id, {uint8_t(goal), uint8_t(goal >> 8)}});
+      m_.lag[k] = std::abs(goal - j_[k].pos) > kLagSteps ? m_.lag[k] + 1 : 0;
+      if (m_.lag[k] >= kLagTicks || std::abs(j_[k].load) > kLoadAbort) {
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "joint %d blocked: goal %d, at %d, load %d", k + 1, goal, j_[k].pos, j_[k].load);
+        stop(buf);
+        return;
+      }
+    }
+    bus_.sync_write(GOAL, items);
   }
 
   void client_gone(int fd) {
@@ -229,6 +287,7 @@ class Server {
   Bus bus_;
   std::array<Joint, N> j_{};
   Motion m_;
+  std::string fault_;  // set when servo mode aborted on a blockage; servo commands refused until "clear"
 };
 
 json handle(Server& s, Client& c, const json& req) {
@@ -242,6 +301,8 @@ json handle(Server& s, Client& c, const json& req) {
     return s.torque(req.value("on", false), js);
   }
   if (cmd == "move") return s.move(req.at("targets"), req.value("speed", 400.0), c.fd);
+  if (cmd == "servo") return s.servo(req.at("targets"), c.fd);
+  if (cmd == "clear") { s.clear_fault(); return {{"ok", true}}; }
   return {{"error", "unknown cmd " + cmd}};
 }
 }  // namespace

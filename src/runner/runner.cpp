@@ -13,6 +13,7 @@
 
 #include "api/api_impl.hpp"
 #include "env/sim_pick_cube.hpp"
+#include "real/real_so101.hpp"
 #include "record/recorder.hpp"
 
 #ifndef SKILLARM_ROOT
@@ -53,6 +54,31 @@ std::string check_program_source(const fs::path& src) {
   return "";
 }
 
+namespace {
+// Real-arm tasks need SKILLARM_REAL=1 (set by `skillarm run --real`, which asks the operator first) and the servo
+// server address in SKILLARM_ARM (default 100.115.242.117:7755).
+std::unique_ptr<EnvironmentAdapter> make_env(const std::string& task) {
+  const std::string root = SKILLARM_ROOT;
+  if (task == "pick_cube") return std::make_unique<SimPickCube>(root + "/models/so101/task_pick_cube.xml");
+  if (task == "real_pick_cube") {
+    const char* ok = std::getenv("SKILLARM_REAL");
+    if (!ok || std::string(ok) != "1") throw std::runtime_error("real_pick_cube needs `skillarm run --real` (operator present)");
+    std::string addr = std::getenv("SKILLARM_ARM") ? std::getenv("SKILLARM_ARM") : "100.115.242.117:7755";
+    const auto colon = addr.rfind(':');
+    auto judge = [] {
+      std::printf("operator: did the arm complete the task? [y/n] ");
+      std::fflush(stdout);
+      char line[16] = {};
+      return std::fgets(line, sizeof line, stdin) && (line[0] == 'y' || line[0] == 'Y');
+    };
+    return std::make_unique<RealSo101>(addr.substr(0, colon), std::stoi(addr.substr(colon + 1)),
+                                       root + "/config/so101_calibration.json", root + "/models/so101/real_desk.xml",
+                                       RealTask{}, judge);
+  }
+  throw std::runtime_error("unknown task " + task + " (available: pick_cube, real_pick_cube)");
+}
+}  // namespace
+
 fs::path compile_program(const fs::path& src, const fs::path& build_dir) {
   fs::create_directories(build_dir);
   const fs::path dll = build_dir / "program.dll";
@@ -79,9 +105,9 @@ fs::path compile_program(const fs::path& src, const fs::path& build_dir) {
 }
 
 int run_trial(const fs::path& dll, const fs::path& src, const std::string& task, int seed, const fs::path& out_root) {
-  if (task != "pick_cube") throw std::runtime_error("unknown task " + task + " (available: pick_cube)");
-  SimPickCube env(std::string(SKILLARM_ROOT) + "/models/so101/task_pick_cube.xml");
-  Recorder rec(out_root, "skillarm_sim", task, seed, src);
+  std::unique_ptr<EnvironmentAdapter> env_p = make_env(task);
+  EnvironmentAdapter& env = *env_p;
+  Recorder rec(out_root, env.embodiment(), task, seed, src);
   const auto t_reset = std::chrono::steady_clock::now();
   const auto ctx = env.reset(seed);
   rec.time_bucket("reset", std::chrono::duration<double>(std::chrono::steady_clock::now() - t_reset).count());
