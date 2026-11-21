@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
@@ -56,6 +57,7 @@ void capture(const std::string& dev, int w, int h, bool mjpeg, Latest& out) {
   auto fail = [&](const std::string& e) {
     std::lock_guard<std::mutex> l(out.m);
     out.error = e + ": " + std::strerror(errno);
+    out.data.clear();  // never serve a frame from before the failure
     std::fprintf(stderr, "%s\n", out.error.c_str());
   };
   const int fd = open(dev.c_str(), O_RDWR);
@@ -185,7 +187,13 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, [](int) { g_quit = true; });
   std::signal(SIGTERM, [](int) { g_quit = true; });
   Latest cam;
-  std::thread cap(capture, dev, w, h, mjpeg, std::ref(cam));
+  // the camera can drop off the bus (unplugged, USB reset): reopen it once a second until it is back
+  std::thread cap([&] {
+    while (!g_quit) {
+      capture(dev, w, h, mjpeg, cam);
+      for (int i = 0; i < 10 && !g_quit; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+  });
 
   const int ls = socket(AF_INET, SOCK_STREAM, 0);
   int one = 1;

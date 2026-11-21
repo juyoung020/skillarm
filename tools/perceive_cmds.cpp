@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <memory>
 #include <filesystem>
+#include <fstream>
 #include <random>
 #include <string>
 #include <vector>
@@ -492,6 +493,8 @@ int cmd_wrist_check(const std::vector<std::string>& a) {
   }
   std::printf("\n");
   mj_forward(m, d);
+  for (size_t i = 0; i + 1 < a.size(); ++i)  // --fovy DEG: try another field of view for the wrist camera
+    if (a[i] == "--fovy") m->cam_fovy[mj_name2id(m, mjOBJ_CAMERA, "wrist")] = std::stod(a[i + 1]);
   for (int g = 0; g < m->ngeom; ++g)  // robot only: world geoms (the desk) are not in this scene
     if (m->geom_bodyid[g] == 0) m->geom_rgba[4 * g + 3] = 0;
 
@@ -692,6 +695,28 @@ int cmd_cam_aim(const std::vector<std::string>& a) {
     std::printf(", image centre hits the desk %.3f m away at (%.3f %.3f)", t, p[0] + t * f[0], p[1] + t * f[1]);
   }
   std::printf("\n");
+  // --ray u v h: where the ray through pixel (u, v) meets the horizontal plane z = h (calibrated fovy if
+  // config/wrist_camera.json exists)
+  for (size_t i = 0; i + 3 < a.size(); ++i) {
+    if (a[i] != "--ray") continue;
+    const double u = std::stod(a[i + 1]), v = std::stod(a[i + 2]), h = std::stod(a[i + 3]);
+    double fovy = m->cam_fovy[cam];
+    const auto cfg = std::filesystem::path(root) / "config" / "wrist_camera.json";
+    if (std::filesystem::exists(cfg)) {
+      std::ifstream in(cfg);
+      fovy = nlohmann::json::parse(in).value("fovy_deg", fovy);
+    }
+    const double fpx = 240.0 / std::tan(0.5 * fovy * 3.14159265358979 / 180);
+    // camera frame (MuJoCo): x right, y up, -z forward; pixel v grows downwards
+    const double cx = (u - 319.5) / fpx, cy = -(v - 239.5) / fpx;
+    double w[3];
+    for (int r = 0; r < 3; ++r) w[r] = R[3 * r] * cx + R[3 * r + 1] * cy - R[3 * r + 2];
+    if (w[2] >= 0) { std::printf("ray (%.0f, %.0f) does not go down\n", u, v); continue; }
+    const double t = (h - p[2]) / w[2];
+    const double n = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+    std::printf("ray (%.0f, %.0f) meets z = %.3f at (%.3f %.3f), %.3f m from the camera (focal %.0f px)\n", u, v, h,
+                p[0] + t * w[0], p[1] + t * w[1], t * n, fpx);
+  }
   mj_deleteData(d);
   mj_deleteModel(m);
   return 0;
@@ -729,6 +754,11 @@ int cmd_ik_probe(const std::vector<std::string>& a) {
       t.quaternion_wxyz = k == 0 ? now.quaternion_wxyz : k == 1 ? down.quaternion_wxyz : Quat{0, 0, 0, 0};
       const auto r = kin.ik(t, q);
       std::printf("  %s %s", names[k], r.ok ? "ok" : "no");
+      if (r.ok && k == 2) {  // servo targets of the any-orientation solution, for `skillarm arm move`
+        std::printf(" [servo");
+        for (int j = 0; j < kArmDof; ++j) std::printf(" %d:%d", j + 1, cal.to_pos(j, r.joint_positions[size_t(j)]));
+        std::printf("]");
+      }
       if (!r.ok) std::printf(" (%.0f mm)", 1000 * r.position_error_m);
     }
     std::printf("\n");

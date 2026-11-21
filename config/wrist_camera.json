@@ -1,0 +1,4 @@
+{
+  "fovy_deg": 36.0,
+  "note": "real C270 on the wrist: vertical field of view fitted so the model's jaw outline matches the jaws in the frame (skillarm wrist-check --fovy), 2026-11-22; focal 739 px at 640x480"
+}

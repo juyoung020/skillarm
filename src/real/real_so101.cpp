@@ -1,6 +1,8 @@
 #include "real/real_so101.hpp"
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <cmath>
 #include <stdexcept>
 #include <thread>
@@ -53,6 +55,13 @@ RealSo101::RealSo101(const std::string& host, int port, const std::string& calib
     camera_ = std::make_unique<CameraClient>(camera.host, camera.port);
     for (int g = 0; g < m_->ngeom; ++g)  // the self view shows the robot only (geom colour; collisions unchanged)
       if (m_->geom_bodyid[g] == 0) m_->geom_rgba[4 * g + 3] = 0;
+    // calibrated field of view of the real camera (config/wrist_camera.json) replaces the model's nominal one
+    const auto cfg = std::filesystem::path(calibration_json).parent_path() / "wrist_camera.json";
+    if (std::filesystem::exists(cfg)) {
+      std::ifstream in(cfg);
+      const auto j = json::parse(in);
+      if (j.contains("fovy_deg")) m_->cam_fovy[mj_name2id(m_, mjOBJ_CAMERA, "wrist")] = j["fovy_deg"].get<double>();
+    }
     self_view_ = std::make_unique<SimCamera>(m_, "wrist", 640, 480);
   }
 }

@@ -136,7 +136,8 @@ choosing any approach height or grasp offset.
   about the vertical so +z is perpendicular to the narrower horizontal side of the observed box,
   keeping the yaw nearest the radial direction); do **not** add the offset again to its
   candidates.
-- **Opening:** about 7 cm fully open; `generate_grasps` skips any side wider than 6.5 cm and
+- **Opening:** the fingertip pads are 77.9 mm apart fully open (`skillarm jaw-open`); `generate_grasps` measures
+  the footprint on the desk plane, skips any side wider than 7.2 cm and
   fails `NOT_FOUND` ("object wider than the jaw opening") when no side fits.
 - **Arrival check:** `move_to_pose` fails `TOLERANCE_NOT_MET` unless position error ≤ `tolerance`
   and orientation error ≤ 10° (position-only targets skip the orientation test).
@@ -164,6 +165,97 @@ move to +4.5 cm above the grasp point, top-down → descend to the object's cent
 and jaw geometry, not perception. `generate_grasps` places the grasp height at the box centre
 minus a quarter of its height (never below 8 mm), slightly lower than the selftest's centre
 +4 mm; that difference is unmeasured.
+
+---
+
+## Top-Face Grasp for Box-Like Objects
+
+**Trigger.** A box-like object rests on the desk with its top face visible, and `generate_grasps` returns
+`NOT_FOUND`, the descent ends `BLOCKED`, or `close_gripper` leaves `gripper_position` near 0 (closed on
+nothing). Build the top-down grasp from the top face instead of the whole visible cloud: the points within
+6 mm of the 95th-percentile z, a minimum-area rectangle over yaw, closing across the side nearest the radial
+direction, tool centre `width/2 + 2 mm` back from the face centre (the tool centre is on the fixed jaw).
+Approach: `move_to_pose(grasp raised 0.045 m, same orientation, 0.01, 300)`, `move_to_pose(grasp, 0.01, 200)`,
+`close_gripper`, lift position-only +0.09 m; 45-70 ticks. `quantile` is the template helper above.
+
+```cpp
+// gripper pointing straight down, jaws closing along (cos phi, sin phi, 0):
+// rotation columns x = (0, 0, -1), y = (-sin phi, cos phi, 0), z = (cos phi, sin phi, 0)
+Quat top_down(double phi) {
+  const double c = std::cos(phi), s = std::sin(phi);
+  const double m[9] = {0, -s, c, 0, c, s, -1, 0, 0};  // row-major
+  const double tr = m[0] + m[4] + m[8];
+  if (tr > 0) {
+    const double S = std::sqrt(tr + 1.0) * 2;
+    return {0.25 * S, (m[7] - m[5]) / S, (m[2] - m[6]) / S, (m[3] - m[1]) / S};
+  }
+  if (m[0] > m[4] && m[0] > m[8]) {
+    const double S = std::sqrt(1.0 + m[0] - m[4] - m[8]) * 2;
+    return {(m[7] - m[5]) / S, 0.25 * S, (m[1] + m[3]) / S, (m[2] + m[6]) / S};
+  }
+  if (m[4] > m[8]) {
+    const double S = std::sqrt(1.0 + m[4] - m[0] - m[8]) * 2;
+    return {(m[2] - m[6]) / S, (m[1] + m[3]) / S, 0.25 * S, (m[5] + m[7]) / S};
+  }
+  const double S = std::sqrt(1.0 + m[8] - m[0] - m[4]) * 2;
+  return {(m[3] - m[1]) / S, (m[2] + m[6]) / S, (m[5] + m[7]) / S, 0.25 * S};
+}
+
+// inside SKILLARM_PROGRAM(api):
+auto loc = api.localize_object("red cube", camera);
+const PointCloud& pc = loc.point_cloud;
+std::vector<double> zs;
+for (const auto& p : pc.points) zs.push_back(p[2]);
+const double z_top = quantile(zs, 0.95);
+const double z_bottom = quantile(zs, 0.02);
+std::vector<std::array<double, 2>> band;
+for (const auto& p : pc.points) if (p[2] >= z_top - 0.006) band.push_back({p[0], p[1]});
+std::optional<std::array<double, 5>> best;  // cx, cy, yaw, width, length
+double best_area = std::numeric_limits<double>::infinity();
+for (int deg = 0; deg < 90 && band.size() >= 10; ++deg) {
+  const double a = deg * 3.14159265358979 / 180.0;
+  const double ca = std::cos(a);
+  const double sa = std::sin(a);
+  std::vector<double> u;
+  std::vector<double> v;
+  for (const auto& q : band) { u.push_back(ca * q[0] + sa * q[1]); v.push_back(-sa * q[0] + ca * q[1]); }
+  const double u0 = quantile(u, 0.02);
+  const double u1 = quantile(u, 0.98);
+  const double v0 = quantile(v, 0.02);
+  const double v1 = quantile(v, 0.98);
+  if ((u1 - u0) * (v1 - v0) < best_area) {
+    best_area = (u1 - u0) * (v1 - v0);
+    const double um = 0.5 * (u0 + u1);
+    const double vm = 0.5 * (v0 + v1);
+    best = std::array<double, 5>{ca * um - sa * vm, sa * um + ca * vm, a, u1 - u0, v1 - v0};
+  }
+}
+if (!best) { api.report("failed_at", "no top face"); return; }
+const double radial = std::atan2((*best)[1], (*best)[0]);
+std::optional<double> phi, w;  // closing direction nearest the radial direction, and the width across it
+for (int k = 0; k < 4; ++k) {
+  const double cand = (*best)[2] + k * 3.14159265358979 / 2;
+  if (std::fabs(std::remainder(cand - radial, 2 * 3.14159265358979)) <= 3.14159265358979 / 4 + 1e-9) {
+    phi = cand;
+    w = (*best)[3 + k % 2];
+    break;
+  }
+}
+if (!phi || !w) { api.report("failed_at", "no closing direction"); return; }
+Pose grasp;
+grasp.quaternion_wxyz = top_down(*phi);
+grasp.position = {(*best)[0] - std::cos(*phi) * (*w / 2 + 0.002), (*best)[1] - std::sin(*phi) * (*w / 2 + 0.002),
+                  std::max(0.5 * (z_top + z_bottom), 0.008)};
+```
+
+**Why it works.** A 3 cm cube seen from an oblique or scene-only view reads 3.5-5.5 cm as a whole cloud (11-18 cm
+with jaw pixels in the mask) with tilted axes; its top face is flat and reads 2.8-2.9 cm.
+
+**Evidence.** pick_cube development: 12/15 -> 14/15 with this grasp, 15/15 with the border rejection
+(localize.md); unseen check 14/15. Verifier (fresh agent, this text only): 5/5, 46-61 ticks.
+
+**Limits.** Validated on the 3 cm cube only. A partly seen top face that is not cut at the image border can
+still read narrow across the jaws (one unseen seed: 3.2 x 1.7 cm, descent BLOCKED).
 
 ---
 

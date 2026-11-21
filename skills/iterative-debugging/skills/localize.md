@@ -106,6 +106,55 @@ reuse a stale center.
 
 ---
 
+## Reject Masks Cut Off at the Image Border
+
+**Trigger.** One camera gives smaller geometry than another, or a grasp built from it lands on the object's
+edge (descent `BLOCKED`), and that camera's mask box touches the image edge: the cloud is a partial object.
+Skip that camera and use the next one in `get_observation().cameras`, or a raised view. Zero ticks.
+
+```cpp
+const std::string cam = api.get_observation().cameras.front().name;  // loop over every camera in practice
+auto loc = api.localize_object("red cube", cam);
+const auto& b = loc.segmentation.box_xyxy;
+const int W = loc.segmentation.width;
+const int H = loc.segmentation.height;
+const bool truncated = W > 0 && H > 0 &&
+    (b[0] <= 1 || b[1] <= 1 || b[2] >= W - 2 || b[3] >= H - 2);
+if (truncated) {
+  api.report(cam + "_truncated", 1.0);
+  // partial object: skip this camera and try the next one
+}
+```
+
+**Evidence.** pick_cube: a raised wrist view cut the cube at the image corner (top face 2.0 x 3.2 cm, descent
+BLOCKED); rejecting it flipped that seed (14/15 -> 15/15). Verifier: fired on 2 of 5 seeds, both passed.
+
+**Limits.** No camera order is established when several give a clean mask (the verifier tried wrist first, then
+scene). Whole-cloud extents above the jaw opening (jaw pixels in the mask) also mark an unusable view, on the
+wrist camera too, but that check is not yet written as code here.
+
+---
+
+## Object Under the Open Jaws at Reset
+
+**Trigger.** At reset the object is under the gripper: the wrist camera finds nothing and the other cloud's
+extents exceed the jaw opening because jaw pixels are in the mask. Raise the tool 6 cm position-only from the
+reset pose (top-down is unreachable higher up), then localize again on every camera. About 33 ticks.
+
+```cpp
+Pose up = api.get_robot_state().end_effector_pose;
+up.position[2] += 0.06;              // straight up from the reset tool pose
+up.quaternion_wxyz = {0, 0, 0, 0};   // position-only
+const auto r = api.move_to_pose(up, 0.02, 200);
+if (!r.ok) api.report("raise_error", r.error.code);
+auto again = api.localize_object("red cube", "scene");
+```
+
+**Evidence.** pick_cube: without the raise 14/15, with it 15/15. Verifier: fired on 1 of 5 seeds (33 ticks), after
+which the scene camera, not the wrist, gave the clean cloud and the seed passed.
+
+---
+
 ## Key Signals
 
 - `segment_text(...).ok` false or empty `items` → prompt not recognized — try a more specific or
