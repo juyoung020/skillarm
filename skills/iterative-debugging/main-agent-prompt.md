@@ -210,7 +210,7 @@ command — which is almost always the thing awaiting approval.
 | `skillarm lint-skills` | **After every skill promotion.** Fails on a fence the program checker rejects, a helper defined nowhere, or a search with no empty case; warns on a loop with no tick cost. |
 | `skillarm watchdog` | Continuously, from kickoff. |
 | `skillarm trace-stats` | Reporting a campaign's cost. Run `--histogram` first and set `--stall-gap` from your own gap distribution, not from the default. |
-| `skillarm audit-seeding` | Before trusting any headline number, and after any change to `SimPickCube::reset` or any other task's reset path. Four checks; an ASPIRE campaign lost every pre-fix sweep to a seeding bug none of them was running. |
+| `skillarm audit-seeding` | Before trusting any headline number, and after any change to `SimPickCube::reset` or any other task's reset path. Three checks (`vary`, `repeat`, `distinct`); an ASPIRE campaign lost every pre-fix sweep to a seeding bug none of them was running. |
 
 ### 2. Fill every free slot
 

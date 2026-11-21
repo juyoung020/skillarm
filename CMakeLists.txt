@@ -70,8 +70,21 @@ else()
   message(STATUS "skillarm: GPU perception disabled (CUDA or TensorRT not found)")
 endif()
 
+add_library(skillarm_tools
+  src/tools/common.cpp
+  src/tools/cpp_scan.cpp
+  src/tools/campaign.cpp
+  src/tools/lint.cpp
+  src/tools/dispatch.cpp
+  src/tools/validate.cpp
+  src/tools/evo.cpp
+  src/tools/agents.cpp
+  src/tools/audit.cpp)
+target_link_libraries(skillarm_tools PUBLIC skillarm_harness)
+target_compile_definitions(skillarm_tools PRIVATE SKILLARM_ROOT="${CMAKE_SOURCE_DIR}")
+
 add_executable(skillarm tools/skillarm.cpp tools/perceive_cmds.cpp)
-target_link_libraries(skillarm PRIVATE skillarm_sim skillarm_kin skillarm_harness skillarm_real skillarm_perceive)
+target_link_libraries(skillarm PRIVATE skillarm_sim skillarm_kin skillarm_harness skillarm_real skillarm_perceive skillarm_tools)
 target_compile_definitions(skillarm PRIVATE SKILLARM_ROOT="${CMAKE_SOURCE_DIR}")
 add_custom_command(TARGET skillarm POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different ${MUJOCO_DIR}/bin/mujoco.dll $<TARGET_FILE_DIR:skillarm>)

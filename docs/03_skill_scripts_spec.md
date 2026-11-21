@@ -2,12 +2,19 @@
 
 Adapted from NVIDIA ASPIRE `.claude/skills/iterative-debugging/scripts/*.py` and
 `.claude/skills/evosearch/scripts/*.py` (Apache-2.0). This document specifies, for every Python
-helper in those two folders (and the inline Python/bash helpers the prompts embed), what the C++
-port must do, precisely enough to implement it without reading the Python. Where the original
-behaviour is kept, it is stated as the requirement; where skillarm differs (task identity, run
-layout, no GPUs/services/init modes, C++ programs), the difference is stated explicitly and
+helper in those two folders (and the inline Python/bash helpers the prompts embed), what its C++
+`skillarm` subcommand does, precisely enough to use or change it without reading the Python. Where
+the original behaviour is kept, it is stated as the behaviour; where skillarm differs (task identity,
+run layout, no GPUs/services/init modes, C++ programs), the difference is stated explicitly and
 marked **[skillarm]**. Prompts that call these commands: `skills/iterative-debugging/*.md`,
 `skills/evosearch/*.md`.
+
+**Source.** `src/tools/` (library `skillarm_tools`, linked into `skillarm.exe`; `tools/skillarm.cpp`
+hands every subcommand below to `tools::dispatch`): `common.*` (§0.1–0.2, seed lists, atomic writes,
+child processes), `cpp_scan.*` (the C++ token scanner of §3.2 and §5), `campaign.cpp` (§1–3),
+`dispatch.cpp` (§4), `lint.cpp` (§5), `validate.cpp` (§6, §13), `agents.cpp` (§7–8), `audit.cpp`
+(§9), `evo.cpp` (§11, §12, §14, §15). A subcommand that ends with a message (Python's
+`SystemExit(message)`) prints it to stderr and exits 1 (2 for usage errors).
 
 ## 0. Overview
 
@@ -77,6 +84,7 @@ Never an error (files are read while other processes write them).
 **Seed lists [skillarm]:** every seed argument accepts a comma-separated list whose items are
 integers or inclusive ranges `a-b` (`1-50`, `51,52,60-65`); the result is de-duplicated and sorted
 where the original sorted (`validate`, `evo-eval`). Python took space-separated `nargs="+"`.
+A malformed item exits 2 with `bad seed list item '<item>' (use integers and ranges: 1-50,60,61)`.
 `format_seed_range(seeds)`: sort; if contiguous, `"start-end"` (or `"n"` for one seed); else
 comma-joined.
 
@@ -95,8 +103,8 @@ uses 2-space indentation and a trailing newline unless stated.
 4. For each: update SHA-256 with `relpath` (UTF-8), a `\0` byte, the file's raw bytes, a `\0` byte.
 5. Return the first 16 lowercase hex chars.
 
-`recorder.cpp` already has `sha256_hex`; reuse it (it hashes a whole string, so build the
-concatenation, or add an incremental API).
+The hash is `sha256_hex` from `src/record/recorder.hpp` (the recorder's SHA-256, shared by every
+tool) over the concatenation; path components are hashed as UTF-8.
 
 ### 0.3 Run layout the tools read (`src/record/recorder.cpp`)
 
@@ -104,8 +112,9 @@ concatenation, or add an incremental API).
 compile.cmd, compile.log}` and, per seed, `OUT/<seed:04d>/run-<UTC %Y%m%dT%H%M%SZ>-<hex8>/`:
 
 ```
-run.json             run_id, benchmark ("skillarm_sim"), task_id (task name), seed, started_utc,
-                     finished_utc, status ("in_progress" → "finalized"), harness ("skillarm")
+run.json             run_id, benchmark (the embodiment, "so101_sim"), task_id (task name), seed,
+                     started_utc, finished_utc, status ("in_progress" → "finalized"),
+                     harness ("skillarm"), capture{episode_max_steps}
 outcome.json         program_ok, task_success, steps_executed, simulator_duration_s,
                      termination_reason, environment_terminated, environment_truncated, [error],
                      wall_duration_s, timing{buckets{...}, unattributed_s}
@@ -127,17 +136,19 @@ success, 1 otherwise; any other exit code is a crash.
 
 There is no `results.jsonl` (ASPIRE's `run-batch` wrote one); tools read outcomes from disk.
 
-### 0.4 Prerequisite recorder change
+### 0.4 Episode budget in run.json
 
-`evo-eval` and `validate` identities need the episode budget recorded per run. Add to `run.json`:
-`"capture": {"episode_max_steps": <TaskContext::episode_max_steps>}` (done; later also
-`camera_width`, `camera_height` once cameras render).
+`evo-eval` and `validate` identities include the episode budget, so the recorder writes it per run:
+`run.json` `"capture": {"episode_max_steps": <TaskContext::episode_max_steps>}`. The tools take the
+budget of a task from `task_episode_max_steps(task)` (`src/runner/runner.cpp`), which knows the
+simulated tasks only (`pick_cube`: 1500); `validate` and `evo-eval` therefore run simulated tasks.
 
 ### 0.5 Cameras
 
 Camera width/height are part of ASPIRE's run identity (`--camera-width 800 --camera-height 512`).
-skillarm publishes no cameras yet, so they are omitted from identities. When cameras land, add
-them to the identity objects in §6 and §11 — this deliberately changes every `run_id`.
+The skillarm simulation publishes one fixed camera, `scene` (640×480), that no flag changes, so
+identities omit camera size. Making the size configurable means adding it to `run.json` `capture`
+and to the identity objects in §6 and §11, which deliberately changes every `run_id`.
 
 ---
 
@@ -317,7 +328,8 @@ Not an object → `["not a JSON object"]`. Otherwise, in this order:
 
 ### 3.2 Snippet checks on `proposed_new[i].code` (C++)
 
-The original parsed Python with `ast`. The C++ port works on a token stream. **Preprocessing**:
+The original parsed Python with `ast`. skillarm scans C++ tokens (`src/tools/cpp_scan.cpp`; it does
+not parse C++, the patterns below are lexical). **Preprocessing**:
 dedent; produce `code_nc` = code with `//` and `/* */` comments removed and string/char literal
 *contents* replaced by spaces (keep the quotes), and `literals` = list of string literal values
 (raw strings `R"(...)"` included) with their character offsets.
@@ -325,11 +337,14 @@ dedent; produce `code_nc` = code with `//` and `/* */` comments removed and stri
 1. **Throw** (replaces "raises an exception programs cannot use"): any `\bthrow\b` in `code_nc` →
    `<where>: code throws, which programs cannot use (no <stdexcept>; report and return instead)`.
 2. **Program-checker rejection**: apply the per-line include and directive rules and the banned
-   substring list of `check_program_source` (`src/runner/runner.cpp`; share the code, do not copy
-   the list) to the raw `code` (comments included, exactly as the runner does), except the
+   substring list of `check_program_source` (`check_program_text(code, require_entry = false)` in `src/runner/runner.cpp`, the same
+   code the runner uses) to the raw `code` (comments included, exactly as the runner does), except the
    `SKILLARM_PROGRAM(` requirement → `<where>: code would be rejected by the program checker (<reason>)`.
 3. **Parse**: brackets `() [] {}` must balance in `code_nc` and no string literal may be
-   unterminated → else `<where>: code does not parse (<which bracket> at line <n>); a verifier cannot run it`.
+   unterminated → else `<where>: code does not parse (<message>); a verifier cannot run it`, where
+   `<message>` is `unmatched ')' at line <n>`, `closing ')' does not match '{' at line <n>`,
+   `'(' was never closed at line <n>` or `unterminated string literal at line <n>`. A snippet that
+   does not parse gets no checks 4 and 5.
 4. **Undefined derived scalars** (`snippet_free_names`). Over-approximating, erring toward
    acceptance:
    - *bound* = every identifier that is declared anywhere in the snippet: the name in
@@ -343,7 +358,9 @@ dedent; produce `code_nc` = code with `//` and `/* */` comments removed and stri
      (`+ - * / % < > <= >= == != && ||`, compound assignments on the right-hand side) or of unary
      minus/`~` — not `!` — *and* are not immediately followed by `(` (a call), `.`, `->`, `[`, or
      `::` (an object whose member is read; the original excluded attribute bases), and not
-     preceded by `.`, `->`, `::`.
+     preceded by `.`, `->`, `::`. `<`/`>` that close over a type list (`std::vector<Pose>`) are
+     template brackets, not comparisons; a `*`/`&` counts as a declarator only when it hugs the
+     type (`Pose* p`), so `w * h` stays arithmetic.
    - *supplied* = C++ keywords, `std`, `api`, `true false nullptr`, the API method names, the
      skillarm type names, `<cmath>` functions, and the library idioms
      `quantile cloud_quantiles column closing_axis quaternion_product yaw_about_z locate
@@ -354,8 +371,7 @@ dedent; produce `code_nc` = code with `//` and `/* */` comments removed and stri
 5. **Prompt required**: needs a prompt if `skill == "localize.md"` or `code_nc` matches
    `\b(segment_text|segment_points|localize_object)\s*\(`. A *prompt literal* is any string
    literal except: literals in `NON_PROMPT_STRINGS` = {`robot_base`, `top_down`,
-   `highest_score`, `interpolation`, `rrt`, `primary`, `world`} ∪ published camera names (none
-   yet); literals matching `^<.*>$` (placeholders); literals that are the first argument of
+   `highest_score`, `interpolation`, `rrt`, `primary`, `world`} ∪ published camera names (`scene`); literals matching `^<.*>$` (placeholders); literals that are the first argument of
    `report(` or any argument of `log(`. None left →
    `<where>: depends on segmentation but names no prompt in the code — give the concrete prompt string(s) a reader would pass to segment_text/localize_object`.
 
@@ -494,7 +510,7 @@ parsed `` `name(`` patterns out of `docs/api-reference.md`.
 **Error checks** (per target fence):
 
 1. **Program-checker rejection** — the include/directive rules and banned substrings of
-   `check_program_source` (shared code), without the `SKILLARM_PROGRAM(` requirement →
+   `check_program_text` (the runner's own code), without the `SKILLARM_PROGRAM(` requirement →
    `<file>:<line>  REJECTED: <reason>`. Unbalanced brackets / unterminated literal →
    `<file>:<line>  SYNTAX: <message>`; skip the remaining checks for that fence.
 2. **Undefined helpers.** *defined* = names of function definitions in any fence of context +
@@ -502,9 +518,12 @@ parsed `` `name(`` patterns out of `docs/api-reference.md`.
    `auto NAME = [`). *called* (targets only) = `NAME(` not preceded by `.`, `->`, `::`, not a C++
    keyword or control word (`if for while switch return sizeof catch static_cast …`), not a type
    name being constructed (skillarm type names, `std::` types, names declared in the fence as a
-   type), not a `<cmath>`/`<algorithm>` function usable unqualified. Undefined = called − defined −
-   safe. Also flag `api.NAME(` where NAME is not an `Api` method (**[skillarm]** new; catches
-   invented tools like `api.step(`). Report `  <name padded 24> [<up to 4 sites file:line>]`.
+   type), not a `<cmath>`/`<algorithm>` function usable unqualified, not itself a declaration
+   (`Pose p(…)`), and not a callable the same fence declares (a lambda variable or a parameter).
+   Undefined = called − defined − safe. Also flag `api.NAME(` where NAME is not an `Api` method
+   (**[skillarm]** new; catches invented tools like `api.step(`), reported as `api.NAME`. Report
+   `  <name padded 24> [<up to 4 sorted sites file:line>]`; `<line>` is the fence's line, as in
+   the original.
 3. **Search with no empty case.**
    - *Seeded search*: a variable declared with an initializer that is not `nullptr`,
      `std::nullopt` or `{}` (empty optional), which is later assigned (`NAME =`, not `==`) inside a
@@ -602,8 +621,8 @@ compact). `is_full_heldout(identity) = identity.seeds == heldout`.
 `results`; print `seed <NN>: SKIP matching manifest` for the others (`<NN>` = 2-digit zero pad).
 
 **Execution [skillarm].** Check and compile the program once (`check_program_source`,
-`compile_program(program, build)`); on rejection or compile failure print the reason, record
-nothing, and exit 1 (no seed ran). Then for each pending seed (up to `--workers` at once): print
+`compile_program(program, build)`); on rejection (`program rejected: <reason>`) or compile failure (`compile failed:` + the
+compiler log) print the reason, record nothing, and exit 1 (no seed ran). Then for each pending seed (up to `--workers` at once): print
 `seed <NN>: RUN -> <log>`; spawn `skillarm trial <dll> <program> <task> <seed> <results_base>` with
 stdout+stderr to `logs/seed_<NN>.log`; wait; locate the run dir: the last `-> (.+)$` match in the
 log if it is a directory, else the newest (by mtime) directory `results_base/<seed:04d>/*`; then
@@ -622,7 +641,7 @@ serialize manifest updates under a mutex.
 
 **`finish`**: recompute trials/passes/pass_rate (0.0 if no trials); `status = "complete"` if
 `trials == len(seeds)` else `"partial"`; `updated_at`; write. If complete and full held-out:
-`update_stage1_validation`. If `run_root` is known: regenerate progress (`progress --run-root`,
+`update_stage1_validation`. If `run_root` is known and has a `tasks.json`: regenerate progress (`progress --run-root`,
 in-process). Print `run=<run_id> status=<status> passes=<passes>/<trials> manifest=<path>`. Exit 1
 if any seed had no artifact or status ≠ complete, else 0.
 
@@ -675,7 +694,8 @@ transcripts and the campaign's own manifests.
 **CLI.** `--run-root` (default LATEST); `--transcripts GLOB` (default: every
 `<home>/.claude*/projects/*/*/subagents/*.jsonl`, see §7); `--stall-gap SECONDS` (900);
 `--histogram`; `--json PATH`.
-
+`--transcripts` takes `*`/`?` wildcards inside path components (no `**`). Paths are handled as
+UTF-8 (project folders under `.claude/projects` can hold non-ASCII names).
 **Per transcript `scan(path)`.** For each line parsing as JSON: collect `timestamp` (ISO-8601,
 `Z` = UTC); sum `message.usage` fields `input_tokens, output_tokens,
 cache_creation_input_tokens, cache_read_input_tokens`; until a task is found, search the first
@@ -727,8 +747,9 @@ LIST` (default **[skillarm]** `51-80`, development + unseen-check; original `51-
 
 **State read.** After `env.reset(seed)`, every MuJoCo joint with `jnt_type == mjJNT_FREE` (the
 movable objects): name → its `qpos[adr..adr+3]` rounded to 5 decimals. `signature` = joints sorted
-by name, joined `"<name>:<x,y,z>"` with `|`. Needs a read-only accessor on the env (`model()`,
-`data()`), used only by this tool.
+by name, joined `"<name>:<x>,<y>,<z>"` with `|` (numbers printed with up to 5 decimals, trailing
+zeros dropped). The tool reads `SimPickCube::planning_model()` and the host-only `SimPickCube::data()`
+(read-only simulator state, used only here); `--task` is a simulated task (`pick_cube`).
 
 - **vary**: reset each seed; print header `joint distinct spread (mm)`; per joint: number of
   distinct xyz tuples across seeds, and spread = max over pairs and axes of |Δ| × 1000; then
@@ -751,7 +772,7 @@ Dropped: `modes` (LIBERO `seeded` vs `saved` init modes; skillarm has one reset 
 
 ## 10. `scene_snapshot.py` → `skills/iterative-debugging/scripts/scene_snapshot.cpp`
 
-Not a host script: it is an observation-only agent program, so it is ported as a C++ program (done)
+Not a host script: it is an observation-only agent program, so it is a C++ program
 and run with `skillarm run`. It reports `task_language`, `task_id`, `task_name`,
 `episode_max_steps`, `base_frame`, `home_tcp_p0..2`, `home_tcp_q0..3`, `cameras`
 (comma-joined), `probe_camera`, `perception_check` (`ok` or the error code of
@@ -876,7 +897,9 @@ mtime) whose `run.json.status == "finalized"` and whose `outcome.json` parses; p
 `<seed> <program_ok> <task_success> <termination_reason> <steps_executed>` (booleans as
 `true`/`false`), or `<seed> NO ARTIFACT <reason>` when a seed directory has no finalized run.
 Finally `passed <n> of <total>` (total = seed directories seen). Optional `--json` prints the rows
-as a JSON array instead. Exit 0 (it reports; it does not judge).
+as a JSON array instead: `{seed, artifact: true, program_ok, task_success, termination_reason,
+steps_executed, run_dir}` or `{seed, artifact: false, reason}`; `<reason>` is `no finalized run`
+or `no run directory`. Exit 0 (it reports; it does not judge).
 
 ---
 
@@ -889,7 +912,8 @@ as a JSON array instead. Exit 0 (it reports; it does not judge).
 `baseline = max(baseline, pass_rate)` (both start at 0.0). Print
 `Best Evolutionary Search: <best:.0%>  (seeds 51-65)` and
 `Baseline fix_code.cpp:     <baseline:.0%>  (candidate_A verbatim)` (**[skillarm]**: print the
-actual `trial_seeds` of the summaries instead of the literal `51-65` when they differ). Exit 0 if
+actual `trial_seeds` of the summaries, as `format_seed_range`, joined with `; ` when summaries
+differ; `51-65` when no summary has any). Exit 0 if
 `best > baseline`, else 1 (a tie keeps the baseline).
 
 ---

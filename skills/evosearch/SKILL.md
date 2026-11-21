@@ -27,9 +27,9 @@ seeds 51–65 and held-out seeds 1–50 never overlap.
 5. Read `include/skillarm/api.hpp`, `src/runner/runner.cpp` (program rules),
    `src/record/recorder.cpp` (run artifacts), and [main-agent-prompt.md](main-agent-prompt.md).
 
-`evo-eval`, `evo-analyze`, `evo-compare`, `evo-progress` and `validate` are ports of ASPIRE's
-Python scripts, specified in `docs/03_skill_scripts_spec.md`; until one is built, do its step by
-hand and say so.
+`evo-eval`, `evo-analyze`, `evo-compare`, `evo-progress` and `validate` are `skillarm`
+subcommands (C++ ports of ASPIRE's Python scripts, source in `src/tools/`); their exact
+behaviour and output are specified in `docs/03_skill_scripts_spec.md`.
 
 ## Run Order
 

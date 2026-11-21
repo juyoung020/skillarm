@@ -7,6 +7,9 @@
 //   skillarm arm stream [seconds]
 //   skillarm arm clear                                              clear a latched servo-mode blockage fault
 //   skillarm run program.cpp [--task pick_cube] [--seeds ..] [--real] compile + run an agent program per seed
+//   skillarm init-run | progress | skill-sha | check-skill-report | dispatch | lint-skills | validate | watchdog |
+//            trace-stats | audit-seeding | score | evo-eval | evo-analyze | evo-compare | evo-progress
+//                                                                    skill helper tools (docs/03_skill_scripts_spec.md)
 // Real arm address: SKILLARM_ARM=host:port (default 100.115.242.117:7755).
 #include <algorithm>
 #include <chrono>
@@ -29,6 +32,7 @@
 #include "sim/path_check.hpp"
 #include "perceive/clip_tokenizer.hpp"
 #include "perceive_cmds.hpp"
+#include "tools/tools.hpp"
 
 using namespace skillarm;
 using nlohmann::json;
@@ -266,6 +270,7 @@ int main(int argc, char** argv) {
       print_verdict(v);
       return v.safe ? 0 : 1;
     }
+    if (int rc; tools::dispatch(cmd, rest, rc)) return rc;  // skill helper tools (docs/03_skill_scripts_spec.md)
     if (cmd == "arm") return arm_cmd(rest);
     if (cmd == "run" && argc >= 3) return run_cmd(argv[0], rest);
     if (cmd == "trial" && argc >= 7) return run_trial(argv[2], argv[3], argv[4], std::atoi(argv[5]), argv[6]);

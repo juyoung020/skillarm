@@ -29,7 +29,10 @@ std::string check_program_source(const fs::path& src) {
   if (!f) return "cannot read " + src.string();
   std::stringstream ss;
   ss << f.rdbuf();
-  const std::string code = ss.str();
+  return check_program_text(ss.str(), true);
+}
+
+std::string check_program_text(const std::string& code, bool require_entry) {
   static const std::set<std::string> allowed = {"\"skillarm/api.hpp\"", "<cmath>", "<vector>", "<string>", "<array>",
                                                 "<algorithm>", "<utility>", "<optional>", "<limits>", "<numeric>"};
   const std::regex inc(R"(^\s*#\s*include\s*([<"][^>"]+[>"]))");
@@ -50,7 +53,7 @@ std::string check_program_source(const fs::path& src) {
                                  "VirtualAlloc", "reinterpret_cast", "extern \"C\" __declspec(dllimport)", "getenv"};
   for (const char* b : banned)
     if (code.find(b) != std::string::npos) return std::string("forbidden construct: ") + b;
-  if (code.find("SKILLARM_PROGRAM(") == std::string::npos) return "missing SKILLARM_PROGRAM(api) entry point";
+  if (require_entry && code.find("SKILLARM_PROGRAM(") == std::string::npos) return "missing SKILLARM_PROGRAM(api) entry point";
   return "";
 }
 
@@ -78,6 +81,12 @@ std::unique_ptr<EnvironmentAdapter> make_env(const std::string& task) {
   throw std::runtime_error("unknown task " + task + " (available: pick_cube, real_pick_cube)");
 }
 }  // namespace
+
+int task_episode_max_steps(const std::string& task) {
+  if (task == "pick_cube")
+    return SimPickCube(std::string(SKILLARM_ROOT) + "/models/so101/task_pick_cube.xml").task_context().episode_max_steps;
+  throw std::runtime_error("unknown simulated task " + task + " (available: pick_cube)");
+}
 
 fs::path compile_program(const fs::path& src, const fs::path& build_dir) {
   fs::create_directories(build_dir);

@@ -35,9 +35,8 @@ disjoint scenes.
    layout is written by `src/record/recorder.cpp`.
 
 Every `skillarm` subcommand used below other than `run`, `trial`, `sim-selftest`, `ik-test`,
-`path-check` and `arm` is a port of one of ASPIRE's Python helper scripts and is specified in
-`docs/03_skill_scripts_spec.md`. Until a subcommand is built, do the step it describes by hand
-and say so in your summary.
+`path-check` and `arm` is a C++ port of one of ASPIRE's Python helper scripts (source in `src/tools/`); each one's
+exact behaviour and output are specified in `docs/03_skill_scripts_spec.md`.
 
 ## Run Order
 

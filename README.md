@@ -11,7 +11,9 @@ C++/CUDA, native Windows, SO-101.
 > The real arm runs behind a C++ servo server on the Pi (continuous 30 Hz servo mode, blockage/overload stop with a
 > latched fault). Perception runs on TensorRT: SAM3 (fp16) finds the cube in 55 ms per new frame (7 ms when only the
 > text changes), MoGe-2 depth anchored to the desk plane is within 2.3–3.4 % of the rendered depth on 8/8 sim seeds, and a
-> vision-only pick (`examples/pick_cube_vision.cpp`) succeeds on 7/10 seeds.
+> vision-only pick (`examples/pick_cube_vision.cpp`) succeeds on 7/10 seeds. ASPIRE's skill helper scripts (campaign setup,
+> progress, held-out validation, skill-report and skill-library lint, watchdog, evolutionary-search evaluation) are
+> `skillarm` subcommands in C++ ([`docs/03_skill_scripts_spec.md`](docs/03_skill_scripts_spec.md)).
 > Milestones: [`docs/02_design.md`](docs/02_design.md).
 
 ## Idea
@@ -66,7 +68,9 @@ C++/CUDA, 윈도우 네이티브, SO-101.
 > 10/10 시드 성공, IK는 무작위 6자유도 목표 99.6 %를 한 번에 0.25 ms로 풉니다. 실제 팔은 파이의 C++ 서보 서버 뒤에서
 > 움직입니다(30 Hz 연속 추종, 막힘·과부하 시 정지하고 잠금). 인식은 TensorRT로 돕니다: SAM3(fp16)가 새 화면 하나에
 > 55 ms(글자만 바뀌면 7 ms)로 큐브를 찾고, 책상 평면으로 축척을 맞춘 MoGe-2 깊이는 시뮬 시드 8개 모두 렌더 깊이와
-> 2.3–3.4 % 차이, 카메라만 쓰는 집기 예제(`examples/pick_cube_vision.cpp`)는 10개 중 7개 성공.
+> 2.3–3.4 % 차이, 카메라만 쓰는 집기 예제(`examples/pick_cube_vision.cpp`)는 10개 중 7개 성공. ASPIRE 스킬 보조
+> 스크립트(캠페인 생성, 진행표, 보류 시드 검증, 스킬 보고서·스킬 라이브러리 검사, 감시, 진화 탐색 평가)는 C++ `skillarm`
+> 하위 명령입니다([`docs/03_skill_scripts_spec.md`](docs/03_skill_scripts_spec.md)).
 > 단계 표: [`docs/02_design.md`](docs/02_design.md).
 
 - NVIDIA [ASPIRE](https://github.com/NVlabs/ASPIRE)는 로봇 "학습"을 가중치 대신 **스킬 md를 다듬는 일**로 바꿨습니다.

@@ -29,6 +29,7 @@ class SimPickCube final : public EnvironmentAdapter {
   Vec3d cube_position() const;
   double cube_yaw() const;
   void debug_contacts() const;  // host-only: print current contacts and jaw positions
+  const mjData* data() const { return d_; }  // host-only: read-only simulator state (skillarm audit-seeding)
 
  private:
   mjModel* m_ = nullptr;
