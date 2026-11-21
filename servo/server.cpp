@@ -13,12 +13,15 @@
 //                                               targets by at most 45 steps per 20 ms tick; holds after 500 ms silence
 //   {"cmd":"clear"}                             clear a latched blockage fault (move or servo mode)
 //   {"cmd":"stop"}                              hold where the arm is now
+//   {"cmd":"read","id":2,"addr":21,"len":4}     raw register bytes (diagnostics)
 //
 // Safety, always on:
 //   * targets are clamped to the limits stored in each servo (Min/Max_Position_Limit), 5 steps inside;
 //   * while moving, a joint whose goal leads its position by > 80 steps (7 deg) for 3 ticks, or whose load
 //     exceeds 600 (60 %), aborts the move: every joint holds where it is (torque stays on so nothing drops);
 //   * a client that disconnects while its move runs stops the move;
+//   * after a move, a joint held short of its target by gravity gets its goal nudged past the target (up to
+//     40 steps) until it arrives; the bias rides along in its next move and is dropped on stop or a large load;
 //   * torque limit during moves is 60 % (gripper 45 %);
 //   * the gripper never aborts: its goal stays within 60 steps of where the jaws are, so closing on an object
 //     keeps a bounded squeeze and the move or servo stream carries on.
@@ -54,6 +57,8 @@ constexpr uint16_t kTorqueLimit = 600;
 constexpr int kGripper = 5;                 // joint index of the gripper (servo id 6)
 constexpr int kGripLead = 60;               // max goal lead of the gripper over its position (~5 deg)
 constexpr uint16_t kGripTorqueLimit = 450;  // 45 %: holds a can without crushing it
+constexpr int kHoldDeadband = 4;            // steps: hold correction acts beyond this error
+constexpr int kHoldBias = 40;               // steps: largest hold correction (~3.5 deg)
 constexpr int kServoStep = 45;          // max goal change per 20 ms tick (~4 deg)
 constexpr int kServoTimeoutMs = 500;     // no servo command for this long -> hold
 
@@ -146,6 +151,8 @@ class Server {
     if (!on && m_.active) stop("torque off");
     for (int jn : joints) {
       auto& j = j_[jn - 1];
+      hold_[jn - 1] = -1;  // a torque change starts over from where the joint is
+      hold_off_[jn - 1] = 0;
       if (on) {
         // goal := present first, so enabling torque never jumps to a stale goal
         if (j.pos >= 0) bus_.write_u16(j.id, GOAL, uint16_t(std::clamp(j.pos, 0, 4095)));
@@ -211,8 +218,36 @@ class Server {
 
   void clear_fault() { fault_.clear(); }
 
+  // raw register read (EEPROM/RAM) for diagnostics: {"cmd":"read","id":2,"addr":21,"len":4}
+  json read_regs(int id, int addr, int len) {
+    if (id < 1 || id > N || addr < 0 || addr > 255 || len < 1 || len > 32) return {{"error", "bad read"}};
+    const auto r = bus_.read(uint8_t(id), uint8_t(addr), uint8_t(len));
+    if (!r) return {{"error", "no reply"}};
+    return {{"id", id}, {"addr", addr}, {"bytes", *r}};
+  }
+
   // hold every joint where it is now
+  // Hold correction (the servos' own integral term is 0): after a move, a joint that gravity holds short of its
+  // target gets its goal nudged one step per tick past the target, at most kHoldBias steps, until it arrives.
+  // A large load drops the correction (something is in the way).
+  void hold_tick() {
+    std::vector<std::pair<uint8_t, std::vector<uint8_t>>> items;
+    for (int k = 0; k < N; ++k) {
+      if (hold_[k] < 0 || !j_[k].torque || j_[k].pos < 0) continue;
+      if (std::abs(j_[k].load) > kLoadAbort) { hold_[k] = -1; hold_off_[k] = 0; continue; }
+      const int err = hold_[k] - j_[k].pos;
+      const int before = hold_off_[k];
+      if (std::abs(err) > kHoldDeadband) hold_off_[k] = std::clamp(hold_off_[k] + (err > 0 ? 1 : -1), -kHoldBias, kHoldBias);
+      if (hold_off_[k] == before) continue;
+      const int goal = std::clamp(hold_[k] + hold_off_[k], j_[k].lo, j_[k].hi);
+      items.push_back({j_[k].id, {uint8_t(goal), uint8_t(goal >> 8)}});
+    }
+    if (!items.empty()) bus_.sync_write(GOAL, items);
+  }
+
   void stop(const std::string& why) {
+    hold_.fill(-1);  // stay exactly where the arm is now
+    hold_off_.fill(0);
     std::vector<std::pair<uint8_t, std::vector<uint8_t>>> items;
     for (const auto& j : j_)
       if (j.torque && j.pos >= 0) items.push_back({j.id, {uint8_t(j.pos), uint8_t(j.pos >> 8)}});
@@ -227,7 +262,7 @@ class Server {
   // one control tick: advance the motion and check it
   void tick() {
     sample();
-    if (!m_.active) return;
+    if (!m_.active) { hold_tick(); return; }
     if (m_.servo) { servo_tick(); return; }
     m_.t += kTickMs / 1000.0;
     const double a = std::min(m_.t / m_.dur, 1.0);
@@ -240,7 +275,9 @@ class Server {
         items.push_back({j_[k].id, {uint8_t(goal), uint8_t(goal >> 8)}});
         continue;
       }
-      items.push_back({j_[k].id, {uint8_t(goal), uint8_t(goal >> 8)}});
+      // the joint's gravity bias from its last hold rides along, so a loaded joint does not sag behind the path
+      const int biased = std::clamp(goal + hold_off_[k], j_[k].lo, j_[k].hi);
+      items.push_back({j_[k].id, {uint8_t(biased), uint8_t(biased >> 8)}});
       const int lead = std::abs(goal - j_[k].pos);
       m_.lag[k] = lead > kLagSteps ? m_.lag[k] + 1 : 0;
       if (m_.lag[k] >= kLagTicks || std::abs(j_[k].load) > kLoadAbort) {
@@ -257,6 +294,8 @@ class Server {
       for (int k = 0; k < N; ++k)
         if (m_.on[k] && std::abs(j_[k].pos - int(m_.to[k])) > 15) settled = false;
       if (settled || m_.t > m_.dur + 1.5) {
+        for (int k = 0; k < N; ++k)
+          if (m_.on[k] && k != kGripper) hold_[k] = int(m_.to[k]);  // keep correcting towards it
         m_.active = false;
         broadcast({{"ev", "move_done"}, {"settled", settled}, {"state", state()}});
       }
@@ -312,6 +351,8 @@ class Server {
   std::array<Joint, N> j_{};
   Motion m_;
   std::string fault_;  // set when servo mode aborted on a blockage; servo commands refused until "clear"
+  std::array<int, N> hold_ = {-1, -1, -1, -1, -1, -1};  // target a joint is held at after its last move (-1: none)
+  std::array<int, N> hold_off_{};                         // hold correction: goal bias in steps
 };
 
 json handle(Server& s, Client& c, const json& req) {
@@ -327,6 +368,7 @@ json handle(Server& s, Client& c, const json& req) {
   if (cmd == "move") return s.move(req.at("targets"), req.value("speed", 400.0), c.fd);
   if (cmd == "servo") return s.servo(req.at("targets"), c.fd);
   if (cmd == "clear") { s.clear_fault(); return {{"ok", true}}; }
+  if (cmd == "read") return s.read_regs(req.at("id").get<int>(), req.at("addr").get<int>(), req.value("len", 1));
   return {{"error", "unknown cmd " + cmd}};
 }
 }  // namespace

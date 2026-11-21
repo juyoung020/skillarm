@@ -9,3 +9,4 @@ runs/
 third_party/mujoco/
 models/onnx/
 build-co/
+models/pi05_base/

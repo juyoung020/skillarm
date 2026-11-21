@@ -285,6 +285,7 @@ int main(int argc, char** argv) {
     if (cmd == "cam-aim") return cmd_cam_aim(rest);
     if (cmd == "ik-probe") return cmd_ik_probe(rest);
     if (cmd == "jaw-open") return cmd_jaw_open();
+    if (cmd == "jaw-where") return cmd_jaw_where(rest);
     if (cmd == "tokenize" && argc >= 3) {  // SAM3 text prompt -> CLIP token ids
       ClipTokenizer tok(std::string(SKILLARM_ROOT) + "/models/onnx/sam3/tokenizer.json");
       const auto e = tok.encode(argv[2]);

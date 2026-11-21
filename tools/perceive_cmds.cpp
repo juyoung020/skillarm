@@ -737,6 +737,13 @@ int cmd_ik_probe(const std::vector<std::string>& a) {
   if (!m) { std::printf("model: %s\n", err); return 1; }
   std::vector<double> q(kArmDof);
   for (int j = 0; j < kArmDof; ++j) q[size_t(j)] = cal.to_rad(j, pos[size_t(j)]);
+  // the real servos' calibrated range (EEPROM limits, 5 steps in) instead of the official model's +-100 deg
+  for (int j = 0; j < kArmDof; ++j) {
+    const int id = mj_name2id(m, mjOBJ_JOINT, kJointNames[j]);
+    const double r0 = cal.to_rad(j, cal.joint[j].range_min + 5), r1 = cal.to_rad(j, cal.joint[j].range_max - 5);
+    m->jnt_range[2 * id] = std::min(r0, r1);
+    m->jnt_range[2 * id + 1] = std::max(r0, r1);
+  }
   Kinematics kin(m);
   const Pose now = kin.fk(q);
   std::printf("tool now (%.3f %.3f %.3f) quat (%.3f %.3f %.3f %.3f)\n", now.position[0], now.position[1], now.position[2],
@@ -745,16 +752,28 @@ int cmd_ik_probe(const std::vector<std::string>& a) {
   std::vector<double> home = {0, 0, 0, 1.5707963267948966, 0};
   Pose down = kin.fk(home);
   if (down.position[2] > kin.fk({0, 0, 0, -1.5707963267948966, 0}).position[2]) down = kin.fk({0, 0, 0, -1.5707963267948966, 0});
-  for (size_t i = 0; i + 2 < a.size(); i += 3) {
+  // --quat w x y z: test this orientation in the first column instead of the current one
+  Quat first = now.quaternion_wxyz;
+  std::vector<std::string> pos_args;
+  for (size_t i = 0; i < a.size(); ++i) {
+    if (a[i] == "--quat" && i + 4 < a.size()) {
+      first = {std::stod(a[i + 1]), std::stod(a[i + 2]), std::stod(a[i + 3]), std::stod(a[i + 4])};
+      i += 4;
+    } else {
+      pos_args.push_back(a[i]);
+    }
+  }
+  const auto& P = pos_args;
+  for (size_t i = 0; i + 2 < P.size(); i += 3) {
     Pose t;
-    t.position = {std::stod(a[i]), std::stod(a[i + 1]), std::stod(a[i + 2])};
+    t.position = {std::stod(P[i]), std::stod(P[i + 1]), std::stod(P[i + 2])};
     std::printf("target (%.3f %.3f %.3f):", t.position[0], t.position[1], t.position[2]);
-    const char* names[3] = {"same orientation", "pointing down", "any orientation"};
+    const char* names[3] = {"given orientation", "pointing down", "any orientation"};
     for (int k = 0; k < 3; ++k) {
-      t.quaternion_wxyz = k == 0 ? now.quaternion_wxyz : k == 1 ? down.quaternion_wxyz : Quat{0, 0, 0, 0};
+      t.quaternion_wxyz = k == 0 ? first : k == 1 ? down.quaternion_wxyz : Quat{0, 0, 0, 0};
       const auto r = kin.ik(t, q);
       std::printf("  %s %s", names[k], r.ok ? "ok" : "no");
-      if (r.ok && k == 2) {  // servo targets of the any-orientation solution, for `skillarm arm move`
+      if (r.ok && k != 1) {  // servo targets (first column / any orientation), for `skillarm arm move`
         std::printf(" [servo");
         for (int j = 0; j < kArmDof; ++j) std::printf(" %d:%d", j + 1, cal.to_pos(j, r.joint_positions[size_t(j)]));
         std::printf("]");
@@ -769,6 +788,50 @@ int cmd_ik_probe(const std::vector<std::string>& a) {
 
 // skillarm jaw-open: gap between the fingertip pads (fixed_jaw_pad, moving_jaw_pad) over the gripper range,
 // from the task model's collision geometry.
+// skillarm jaw-where [open 0..1]: with the real arm's current joint angles (gripper at `open`, default 1), the world
+// positions of the tool centre point, both fingertip pads, the middle of the gap between them, and the camera.
+int cmd_jaw_where(const std::vector<std::string>& a) {
+  std::string addr = std::getenv("SKILLARM_ARM") ? std::getenv("SKILLARM_ARM") : "100.115.242.117:7755";
+  const auto colon = addr.rfind(':');
+  const std::string root = SKILLARM_ROOT;
+  ArmClient arm(addr.substr(0, colon), std::stoi(addr.substr(colon + 1)));
+  const auto cal = Calibration::load(root + "/config/so101_calibration.json");
+  auto pos = arm.call({{"cmd", "state"}}).at("pos").get<std::vector<int>>();
+  double open = 1.0;
+  for (const auto& s : a) {  // j:pos overrides the servo position of joint j; a bare number is the opening
+    const auto c = s.find(':');
+    if (c == std::string::npos) { open = std::stod(s); continue; }
+    const int j = std::stoi(s.substr(0, c));
+    if (j >= 1 && j <= kJoints) pos[size_t(j - 1)] = std::stoi(s.substr(c + 1));
+  }
+  char err[512] = {};
+  mjModel* m = mj_loadXML((root + "/models/so101/real_desk.xml").c_str(), nullptr, err, sizeof err);
+  if (!m) { std::printf("model: %s\n", err); return 1; }
+  mjData* d = mj_makeData(m);
+  for (int j = 0; j < kJoints; ++j)
+    d->qpos[m->jnt_qposadr[mj_name2id(m, mjOBJ_JOINT, kJointNames[j])]] = cal.to_rad(j, pos[size_t(j)]);
+  const int jg = mj_name2id(m, mjOBJ_JOINT, "gripper");
+
+  d->qpos[m->jnt_qposadr[jg]] = m->jnt_range[2 * jg] + open * (m->jnt_range[2 * jg + 1] - m->jnt_range[2 * jg]);
+  mj_kinematics(m, d);
+  mj_camlight(m, d);
+  auto pr = [](const char* n, const mjtNum* p) { std::printf("%-16s (%.3f %.3f %.3f)\n", n, p[0], p[1], p[2]); };
+  pr("tool centre", d->site_xpos + 3 * mj_name2id(m, mjOBJ_SITE, "gripperframe"));
+  const int g1 = mj_name2id(m, mjOBJ_GEOM, "fixed_jaw_pad"), g2 = mj_name2id(m, mjOBJ_GEOM, "moving_jaw_pad");
+  pr("fixed jaw pad", d->geom_xpos + 3 * g1);
+  pr("moving jaw pad", d->geom_xpos + 3 * g2);
+  mjtNum mid[3];
+  for (int k = 0; k < 3; ++k) mid[k] = 0.5 * (d->geom_xpos[3 * g1 + k] + d->geom_xpos[3 * g2 + k]);
+  pr("gap middle", mid);
+  pr("camera", d->cam_xpos + 3 * mj_name2id(m, mjOBJ_CAMERA, "wrist"));
+  mjtNum q[4];
+  mju_mat2Quat(q, d->site_xmat + 9 * mj_name2id(m, mjOBJ_SITE, "gripperframe"));
+  std::printf("tool quat        (%.4f %.4f %.4f %.4f)\n", q[0], q[1], q[2], q[3]);
+  mj_deleteData(d);
+  mj_deleteModel(m);
+  return 0;
+}
+
 int cmd_jaw_open() {
   char err[512] = {};
   mjModel* m = mj_loadXML((std::string(SKILLARM_ROOT) + "/models/so101/real_desk.xml").c_str(), nullptr, err, sizeof err);

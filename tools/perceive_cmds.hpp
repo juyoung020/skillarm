@@ -15,5 +15,6 @@ int cmd_real_observe(const std::vector<std::string>& args);
 int cmd_cam_aim(const std::vector<std::string>& args);
 int cmd_ik_probe(const std::vector<std::string>& args);
 int cmd_jaw_open();
+int cmd_jaw_where(const std::vector<std::string>& args);
 void register_perception();
 }  // namespace skillarm
