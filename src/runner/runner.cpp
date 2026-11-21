@@ -58,6 +58,29 @@ std::string check_program_text(const std::string& code, bool require_entry) {
 }
 
 namespace {
+std::function<std::unique_ptr<DepthEstimator>()> g_depth_factory;
+
+// Depth for the real wrist camera, loaded on the first frame that needs it; without a provider the frame keeps no depth.
+class LazyDepth final : public DepthEstimator {
+ public:
+  bool estimate(CameraObservation& cam) override {
+    if (!d_ && !failed_ && g_depth_factory) {
+      try {
+        d_ = g_depth_factory();
+      } catch (const std::exception& e) {
+        failed_ = true;
+        std::fprintf(stderr, "depth provider failed to load: %s\n", e.what());
+      }
+    }
+    return d_ && d_->estimate(cam);
+  }
+
+ private:
+  std::unique_ptr<DepthEstimator> d_;
+  bool failed_ = false;
+};
+LazyDepth g_depth;
+
 // Real-arm tasks need SKILLARM_REAL=1 (set by `skillarm run --real`, which asks the operator first) and the servo
 // server address in SKILLARM_ARM (default 100.115.242.117:7755).
 std::unique_ptr<EnvironmentAdapter> make_env(const std::string& task) {
@@ -76,7 +99,7 @@ std::unique_ptr<EnvironmentAdapter> make_env(const std::string& task) {
     };
     return std::make_unique<RealSo101>(addr.substr(0, colon), std::stoi(addr.substr(colon + 1)),
                                        root + "/config/so101_calibration.json", root + "/models/so101/real_desk.xml",
-                                       RealTask{}, judge);
+                                       RealTask{}, judge, RealCamera{addr.substr(0, colon), 7756, &g_depth});
   }
   throw std::runtime_error("unknown task " + task + " (available: pick_cube, real_pick_cube)");
 }
@@ -148,6 +171,10 @@ class LazySegmenter final : public Segmenter {
   std::string error_;
 };
 }  // namespace
+
+void set_depth_factory(std::function<std::unique_ptr<DepthEstimator>()> factory) {
+  g_depth_factory = std::move(factory);
+}
 
 void set_segmenter_factory(std::function<std::unique_ptr<Segmenter>()> factory) {
   g_segmenter_factory = std::move(factory);

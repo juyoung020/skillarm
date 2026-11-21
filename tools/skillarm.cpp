@@ -279,6 +279,9 @@ int main(int argc, char** argv) {
     if (cmd == "sam3") return cmd_sam3(rest);
     if (cmd == "depth") return cmd_depth(rest);
     if (cmd == "sim-perceive") return cmd_sim_perceive(rest);
+    if (cmd == "cam") return cmd_cam(rest);
+    if (cmd == "wrist-check") return cmd_wrist_check(rest);
+    if (cmd == "real-observe") return cmd_real_observe(rest);
     if (cmd == "tokenize" && argc >= 3) {  // SAM3 text prompt -> CLIP token ids
       ClipTokenizer tok(std::string(SKILLARM_ROOT) + "/models/onnx/sam3/tokenizer.json");
       const auto e = tok.encode(argv[2]);

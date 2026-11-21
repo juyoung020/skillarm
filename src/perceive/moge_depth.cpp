@@ -87,20 +87,47 @@ double MogeDepth::desk_scale(const CameraObservation& cam, const std::vector<flo
       plane.push_back(t);
       idx.push_back(i);
     }
+  desk_fraction_ = 0;
   if (ratio.size() < 100) return 0;
   auto median = [](std::vector<double> v) {
     std::nth_element(v.begin(), v.begin() + ptrdiff_t(v.size() / 2), v.end());
     return v[v.size() / 2];
   };
-  double s = median(ratio);
-  for (int it = 0; it < 3; ++it) {
-    std::vector<double> in;
-    for (size_t k = 0; k < ratio.size(); ++k)
-      if (std::fabs(s * (points[3 * idx[k] + 2] + shift_) - plane[k]) < 0.03 * plane[k]) in.push_back(ratio[k]);
-    if (in.size() < 100) break;
-    s = median(in);
+  // densest ratio (log histogram, 1 % bins) instead of the median: the desk may be a minority of the frame
+  std::vector<double> lr(ratio.size());
+  for (size_t k = 0; k < ratio.size(); ++k) lr[k] = std::log(ratio[k]);
+  const double lo = *std::min_element(lr.begin(), lr.end()), bin = 0.01;
+  std::vector<int> hist(size_t((*std::max_element(lr.begin(), lr.end()) - lo) / bin) + 3, 0);
+  for (double v : lr) ++hist[size_t((v - lo) / bin)];
+  size_t best = 0;
+  int best_n = 0;
+  for (size_t k = 0; k + 2 < hist.size(); ++k)  // 3-bin window
+    if (hist[k] + hist[k + 1] + hist[k + 2] > best_n) { best_n = hist[k] + hist[k + 1] + hist[k + 2]; best = k + 1; }
+  const double s_mode = std::exp(lo + (double(best) + 0.5) * bin);
+  auto refine = [&](double s, size_t& inliers) {
+    inliers = 0;
+    for (int it = 0; it < 3; ++it) {
+      std::vector<double> in;
+      for (size_t k = 0; k < ratio.size(); ++k)
+        if (std::fabs(s * (points[3 * idx[k] + 2] + shift_) - plane[k]) < 0.03 * plane[k]) in.push_back(ratio[k]);
+      inliers = in.size();
+      if (in.size() < 100) break;
+      s = median(in);
+    }
+    return s;
+  };
+  // the median start suits a frame that is mostly desk (it measured better on the sim cube); the densest ratio is
+  // the fallback when the desk is a minority. Accept only when enough of the frame agrees with one plane scale.
+  const double sampled = double(w / 2) * double(h / 2);
+  size_t in_med = 0, in_mode = 0;
+  const double s_med = refine(median(ratio), in_med);
+  if (double(in_med) / sampled >= 0.05) {
+    desk_fraction_ = double(in_med) / sampled;
+    return s_med;
   }
-  return s;
+  const double s2 = refine(s_mode, in_mode);
+  desk_fraction_ = double(in_mode) / sampled;
+  return desk_fraction_ >= 0.05 ? s2 : 0;
 }
 
 bool MogeDepth::estimate(CameraObservation& cam) {

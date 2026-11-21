@@ -9,6 +9,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <memory>
 #include <filesystem>
 #include <random>
 #include <string>
@@ -16,11 +18,14 @@
 
 #include "env/sim_pick_cube.hpp"
 #include "perceive/depth_shift.hpp"
+#include "core/calibration.hpp"
+#include "real/arm_client.hpp"
+#include "real/camera_client.hpp"
+#include "real/real_so101.hpp"
+#include "sim/sim_camera.hpp"
 #include "runner/runner.hpp"
 
 #pragma warning(push, 0)
-#define STB_IMAGE_IMPLEMENTATION
-#define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb/stb_image.h"
 #include "stb/stb_image_write.h"
 #pragma warning(pop)
@@ -390,6 +395,228 @@ int cmd_sim_perceive(const std::vector<std::string>& a) {
 }
 
 
+// skillarm cam [--frames N] [--depth] [--focal F] [--out dir]
+//   Wrist C270 through the Pi camera server (host of SKILLARM_ARM, port 7756): frame latency, and with --depth the
+//   MoGe-2 metric depth per frame (focal estimated on the first frame unless --focal is given, then kept fixed).
+int cmd_cam(const std::vector<std::string>& a) {
+  std::string addr = std::getenv("SKILLARM_ARM") ? std::getenv("SKILLARM_ARM") : "100.115.242.117:7755";
+  const std::string host = addr.substr(0, addr.rfind(':'));
+  int frames = 5;
+  double focal = 0;
+  bool depth = false;
+  std::string out;
+  for (size_t i = 0; i < a.size(); ++i) {
+    if (a[i] == "--frames" && i + 1 < a.size()) frames = std::stoi(a[++i]);
+    else if (a[i] == "--focal" && i + 1 < a.size()) focal = std::stod(a[++i]);
+    else if (a[i] == "--out" && i + 1 < a.size()) out = a[++i];
+    else if (a[i] == "--depth") depth = true;
+  }
+  CameraClient client(host, 7756);
+  CameraObservation cam;
+#ifdef SKILLARM_GPU
+  std::unique_ptr<MogeDepth> net;
+  if (depth) {
+    gpu_init();
+    MogeOptions o;
+    o.onnx = std::string(SKILLARM_ROOT) + "/models/onnx/moge2/moge2_vits_normal.onnx";
+    net = std::make_unique<MogeDepth>(o);
+  }
+#else
+  if (depth) { std::printf("--depth needs the GPU build\n"); return 1; }
+#endif
+  for (int k = 0; k < frames; ++k) {
+    const auto t0 = std::chrono::steady_clock::now();
+    client.grab(cam);
+    const double grab_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("frame %ld %dx%d: grab %.1f ms", client.last_seq(), cam.rgb.width, cam.rgb.height, grab_ms);
+#ifdef SKILLARM_GPU
+    if (net) {
+      cam.intrinsics = {focal, 0, 0.5 * cam.rgb.width - 0.5, 0, focal, 0.5 * cam.rgb.height - 0.5, 0, 0, 1};
+      if (!net->estimate(cam)) { std::printf("\ndepth failed\n"); return 1; }
+      if (focal <= 0) focal = cam.intrinsics[0];  // keep the first estimate
+      std::vector<float> d;
+      for (float z : cam.depth_m) if (z > 0) d.push_back(z);
+      std::sort(d.begin(), d.end());
+      if (!d.empty())
+        std::printf(", depth %.1f ms (focal %.0f px): near %.3f / median %.3f m", net->last_ms(), focal, d[d.size() / 50],
+                    d[d.size() / 2]);
+    }
+#endif
+    std::printf("\n");
+  }
+  if (!out.empty()) {
+    std::filesystem::create_directories(out);
+    stbi_write_png((out + "/wrist.png").c_str(), cam.rgb.width, cam.rgb.height, 3, cam.rgb.rgb.data(), cam.rgb.width * 3);
+    if (!cam.depth_m.empty()) {
+      std::vector<float> d;
+      for (float z : cam.depth_m) if (z > 0) d.push_back(z);
+      std::sort(d.begin(), d.end());
+      const float lo = d[d.size() / 50], hi = d[d.size() * 49 / 50];
+      std::vector<uint8_t> prev(cam.depth_m.size());
+      for (size_t i = 0; i < prev.size(); ++i)
+        prev[i] = cam.depth_m[i] > 0 ? uint8_t(255 * std::clamp((hi - cam.depth_m[i]) / std::max(hi - lo, 1e-3f), 0.f, 1.f)) : 0;
+      stbi_write_png((out + "/wrist_depth.png").c_str(), cam.rgb.width, cam.rgb.height, 1, prev.data(), cam.rgb.width);
+    }
+  }
+  return 0;
+}
+
+// skillarm wrist-check [--out dir]
+//   Real-world depth check with known geometry: the gripper jaws are always in the wrist camera's view and their
+//   true distance follows from the CAD mount pose and the arm's current joint angles (read only, nothing moves).
+//   Renders the robot alone from the model's "wrist" camera, runs MoGe-2 on a live frame with the same intrinsics,
+//   and compares depth on the jaw pixels. --out writes the frame with the rendered jaw outline (registration check).
+int cmd_wrist_check(const std::vector<std::string>& a) {
+#ifdef SKILLARM_GPU
+  std::string out;
+  for (size_t i = 0; i + 1 < a.size(); ++i)
+    if (a[i] == "--out") out = a[i + 1];
+  std::string addr = std::getenv("SKILLARM_ARM") ? std::getenv("SKILLARM_ARM") : "100.115.242.117:7755";
+  const auto colon = addr.rfind(':');
+  const std::string root = SKILLARM_ROOT;
+
+  // joint angles of the real arm
+  ArmClient arm(addr.substr(0, colon), std::stoi(addr.substr(colon + 1)));
+  const auto cal = Calibration::load(root + "/config/so101_calibration.json");
+  const auto st = arm.call({{"cmd", "state"}});
+  char err[512] = {};
+  mjModel* m = mj_loadXML((root + "/models/so101/real_desk.xml").c_str(), nullptr, err, sizeof err);
+  if (!m) { std::printf("model: %s\n", err); return 1; }
+  mjData* d = mj_makeData(m);
+  std::printf("joints (rad):");
+  for (int j = 0; j < kJoints; ++j) {
+    const double q = cal.to_rad(j, st.at("pos").at(size_t(j)).get<int>());
+    d->qpos[m->jnt_qposadr[mj_name2id(m, mjOBJ_JOINT, kJointNames[j])]] = q;
+    std::printf(" %s %+.3f", kJointNames[j], q);
+  }
+  std::printf("\n");
+  mj_forward(m, d);
+  for (int g = 0; g < m->ngeom; ++g)  // robot only: world geoms (the desk) are not in this scene
+    if (m->geom_bodyid[g] == 0) m->geom_rgba[4 * g + 3] = 0;
+
+  CameraObservation truth;
+  {
+    SimCamera wrist(m, "wrist", 640, 480);
+    truth = wrist.capture(m, d);
+  }
+  CameraClient client(addr.substr(0, colon), 7756);
+  CameraObservation cam;
+  client.grab(cam);
+  cam.intrinsics = truth.intrinsics;  // same pinhole as the model camera
+
+  gpu_init();
+  MogeOptions mo;
+  mo.onnx = root + "/models/onnx/moge2/moge2_vits_normal.onnx";
+  MogeDepth net(mo);
+  net.estimate(cam);
+
+  std::vector<double> ratio;
+  std::vector<std::pair<double, double>> pairs;  // (true, estimated)
+  size_t robot_px = 0;
+  for (size_t i = 0; i < truth.depth_m.size(); ++i) {
+    if (truth.depth_m[i] <= 0) continue;
+    ++robot_px;
+    if (cam.depth_m[i] <= 0) continue;
+    ratio.push_back(cam.depth_m[i] / truth.depth_m[i]);
+    pairs.push_back({truth.depth_m[i], cam.depth_m[i]});
+  }
+  if (ratio.size() < 50) { std::printf("jaws not in view (%zu px)\n", ratio.size()); return 1; }
+  std::vector<double> r = ratio;
+  std::sort(r.begin(), r.end());
+  std::vector<double> t;
+  for (auto& p : pairs) t.push_back(p.first);
+  std::sort(t.begin(), t.end());
+  std::printf("robot pixels %zu, true jaw depth %.3f..%.3f m (median %.3f), focal %.1f px\n", robot_px, t.front(),
+              t.back(), t[t.size() / 2], cam.intrinsics[0]);
+  std::printf("MoGe-2 / true on the jaw pixels: median %.2f (p10 %.2f, p90 %.2f)\n", r[r.size() / 2], r[r.size() / 10],
+              r[r.size() * 9 / 10]);
+  if (!out.empty()) {
+    std::filesystem::create_directories(out);
+    std::vector<uint8_t> vis = cam.rgb.rgb;
+    const int w = cam.rgb.width, h = cam.rgb.height;
+    for (int v = 1; v + 1 < h; ++v)
+      for (int u = 1; u + 1 < w; ++u) {
+        const size_t i = size_t(v) * w + u;
+        const bool in = truth.depth_m[i] > 0;
+        const bool edge = in && (truth.depth_m[i - 1] <= 0 || truth.depth_m[i + 1] <= 0 || truth.depth_m[i - size_t(w)] <= 0 ||
+                                 truth.depth_m[i + size_t(w)] <= 0);
+        if (edge) { vis[3 * i] = 255; vis[3 * i + 1] = 0; vis[3 * i + 2] = 255; }
+      }
+    stbi_write_png((out + "/wrist_overlay.png").c_str(), w, h, 3, vis.data(), w * 3);
+  }
+  mj_deleteData(d);
+  mj_deleteModel(m);
+  return 0;
+#else
+  (void)a;
+  std::printf("needs the GPU build\n");
+  return 1;
+#endif
+}
+
+// skillarm real-observe [--frames N] [--out dir]
+//   The real adapter's observe() as a run sees it (joint angles, wrist frame, pose from FK, depth with the gripper
+//   masked). Reads only: nothing is commanded to move.
+int cmd_real_observe(const std::vector<std::string>& a) {
+  int frames = 3;
+  std::string out;
+  for (size_t i = 0; i + 1 < a.size(); ++i) {
+    if (a[i] == "--frames") frames = std::stoi(a[i + 1]);
+    if (a[i] == "--out") out = a[i + 1];
+  }
+  std::string addr = std::getenv("SKILLARM_ARM") ? std::getenv("SKILLARM_ARM") : "100.115.242.117:7755";
+  const auto colon = addr.rfind(':');
+  const std::string root = SKILLARM_ROOT;
+  std::unique_ptr<DepthEstimator> depth;
+#ifdef SKILLARM_GPU
+  gpu_init();
+  MogeOptions mo;
+  mo.onnx = root + "/models/onnx/moge2/moge2_vits_normal.onnx";
+  mo.desk_z = 0;
+  depth = std::make_unique<MogeDepth>(mo);
+#endif
+  RealSo101 env(addr.substr(0, colon), std::stoi(addr.substr(colon + 1)), root + "/config/so101_calibration.json",
+                root + "/models/so101/real_desk.xml", RealTask{}, [] { return false; },
+                RealCamera{addr.substr(0, colon), 7756, depth.get()});
+  Observation o;
+  for (int k = 0; k < frames; ++k) {
+    const auto t0 = std::chrono::steady_clock::now();
+    o = env.observe();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (o.cameras.empty()) { std::printf("no camera\n"); return 1; }
+    const auto& c = o.cameras[0];
+    std::vector<float> d;
+    for (float z : c.depth_m) if (z > 0) d.push_back(z);
+    std::sort(d.begin(), d.end());
+    std::printf("observe %.1f ms: camera %s at (%.3f %.3f %.3f) m, focal %.1f px, depth %.1f %% of pixels", ms, c.name.c_str(),
+                c.camera_pose.position[0], c.camera_pose.position[1], c.camera_pose.position[2], c.intrinsics[0],
+                100.0 * d.size() / std::max<size_t>(1, c.depth_m.size()));
+    if (!d.empty()) std::printf(", median %.3f m", d[d.size() / 2]);
+#ifdef SKILLARM_GPU
+    if (auto* mg = dynamic_cast<MogeDepth*>(depth.get()))
+      std::printf(" (scale from %s, desk %.0f %% of frame)", mg->last_desk_fraction() >= 0.05 ? "desk plane" : "network",
+                  100 * mg->last_desk_fraction());
+#endif
+    std::printf("\n");
+  }
+  if (!out.empty()) {
+    const auto& c = o.cameras[0];
+    std::filesystem::create_directories(out);
+    stbi_write_png((out + "/real_rgb.png").c_str(), c.rgb.width, c.rgb.height, 3, c.rgb.rgb.data(), c.rgb.width * 3);
+    std::vector<float> d;
+    for (float z : c.depth_m) if (z > 0) d.push_back(z);
+    if (!d.empty()) {
+      std::sort(d.begin(), d.end());
+      const float lo = d[d.size() / 50], hi = d[d.size() * 49 / 50];
+      std::vector<uint8_t> prev(c.depth_m.size());
+      for (size_t i = 0; i < prev.size(); ++i)
+        prev[i] = c.depth_m[i] > 0 ? uint8_t(255 * std::clamp((hi - c.depth_m[i]) / std::max(hi - lo, 1e-3f), 0.f, 1.f)) : 0;
+      stbi_write_png((out + "/real_depth.png").c_str(), c.rgb.width, c.rgb.height, 1, prev.data(), c.rgb.width);
+    }
+  }
+  return 0;
+}
+
 void register_perception() {
 #ifdef SKILLARM_GPU
   set_segmenter_factory([]() -> std::unique_ptr<Segmenter> {
@@ -398,6 +625,13 @@ void register_perception() {
     o.dir = std::string(SKILLARM_ROOT) + "/models/onnx/sam3";
     o.variant = "_fp16";  // same masks as fp32 on the cube scenes, about 4x faster
     return std::make_unique<Sam3Segmenter>(o);
+  });
+  set_depth_factory([]() -> std::unique_ptr<DepthEstimator> {
+    gpu_init();
+    MogeOptions o;
+    o.onnx = std::string(SKILLARM_ROOT) + "/models/onnx/moge2/moge2_vits_normal.onnx";
+    o.desk_z = 0;  // real_desk.xml: the desk is z = 0 in the base frame
+    return std::make_unique<MogeDepth>(o);
   });
 #endif
 }

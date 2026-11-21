@@ -105,16 +105,19 @@ Observation SimPickCube::observe() {
   Observation o;
   o.robot_state = robot_state();
   o.timestamp_s = d_->time;
-  // "scene" camera = where the C270 sits on the real desk; 640x480 like the real stream
+  // "scene": fixed view of the work area (sim only). "wrist": the real arm's C270 pose from the mount CAD. 640x480 like
+  // the real stream.
   if (!camera_ && !camera_failed_) {
     try {
       camera_ = std::make_unique<SimCamera>(m_, "scene", 640, 480);
+      wrist_ = std::make_unique<SimCamera>(m_, "wrist", 640, 480);  // same camera as the real arm
     } catch (const std::exception& e) {
       camera_failed_ = true;
       std::fprintf(stderr, "sim camera unavailable: %s\n", e.what());
     }
   }
   if (camera_) o.cameras.push_back(camera_->capture(m_, d_));
+  if (wrist_) o.cameras.push_back(wrist_->capture(m_, d_));
   return o;
 }
 

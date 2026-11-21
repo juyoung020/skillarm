@@ -22,6 +22,8 @@ int task_episode_max_steps(const std::string& task);
 // request, so trials that never segment do not load the networks. Without a factory, segmentation reports
 // PROVIDER_UNAVAILABLE.
 void set_segmenter_factory(std::function<std::unique_ptr<Segmenter>()> factory);
+// Metric depth for real camera frames (MoGe-2 when built with the GPU), loaded on the first real frame.
+void set_depth_factory(std::function<std::unique_ptr<DepthEstimator>()> factory);
 // Runs one seed in this process and writes a run directory under out_root. Returns the process exit code.
 int run_trial(const std::filesystem::path& dll, const std::filesystem::path& src, const std::string& task, int seed,
               const std::filesystem::path& out_root);

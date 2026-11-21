@@ -7,3 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_compile_options(-O2 -Wall -Wextra)
 add_executable(skillarm-servo server.cpp feetech.cpp)
 target_include_directories(skillarm-servo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party)
+
+# Camera server (wrist C270, V4L2) on :7756
+find_package(Threads REQUIRED)
+add_executable(skillarm-camera camera.cpp)
+target_link_libraries(skillarm-camera PRIVATE Threads::Threads)

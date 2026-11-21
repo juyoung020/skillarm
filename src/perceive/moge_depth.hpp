@@ -30,6 +30,8 @@ class MogeDepth final : public DepthEstimator {
   double last_ms() const { return last_ms_; }
   double last_shift() const { return shift_; }
   double last_scale() const { return scale_; }
+  // share of the frame on the desk plane at the chosen scale; desk anchoring is used when >= 5 %
+  double last_desk_fraction() const { return desk_fraction_; }
 
  private:
   double desk_scale(const CameraObservation& cam, const std::vector<float>& points, const std::vector<uint8_t>& valid) const;
@@ -40,6 +42,7 @@ class MogeDepth final : public DepthEstimator {
   uint8_t* d_rgb_ = nullptr;
   std::string scale_name_;
   double last_ms_ = 0, shift_ = 0, scale_ = 1;
+  mutable double desk_fraction_ = 0;
 };
 
 }  // namespace skillarm

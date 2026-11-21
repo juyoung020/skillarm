@@ -14,8 +14,12 @@ constexpr double kStepRad = 2.0 * 3.14159265358979323846 / 4096.0;
 }
 
 RealSo101::RealSo101(const std::string& host, int port, const std::string& calibration_json,
-                     const std::string& scene_xml, RealTask task, std::function<bool()> judge)
-    : arm_(host, port), cal_(Calibration::load(calibration_json)), task_(std::move(task)), judge_(std::move(judge)) {
+                     const std::string& scene_xml, RealTask task, std::function<bool()> judge, RealCamera camera)
+    : arm_(host, port),
+      depth_(camera.depth),
+      cal_(Calibration::load(calibration_json)),
+      task_(std::move(task)),
+      judge_(std::move(judge)) {
   char err[1024] = {};
   m_ = mj_loadXML(scene_xml.c_str(), nullptr, err, sizeof err);
   if (!m_) throw std::runtime_error(std::string("mj_loadXML: ") + err);
@@ -44,6 +48,13 @@ RealSo101::RealSo101(const std::string& host, int port, const std::string& calib
   for (const auto& j : info.at("joints"))
     if (!j.value("ok", false)) throw std::runtime_error("servo " + std::to_string(j.value("id", 0)) + " not responding");
   refresh();
+
+  if (!camera.host.empty()) {
+    camera_ = std::make_unique<CameraClient>(camera.host, camera.port);
+    for (int g = 0; g < m_->ngeom; ++g)  // the self view shows the robot only (geom colour; collisions unchanged)
+      if (m_->geom_bodyid[g] == 0) m_->geom_rgba[4 * g + 3] = 0;
+    self_view_ = std::make_unique<SimCamera>(m_, "wrist", 640, 480);
+  }
 }
 
 RealSo101::~RealSo101() {
@@ -102,9 +113,24 @@ RobotState RealSo101::robot_state() {
 
 Observation RealSo101::observe() {
   Observation o;
-  o.robot_state = robot_state();
+  if (camera_) refresh();  // the frame and the joint angles should belong together
+  o.robot_state = robot_state();  // also leaves the kinematics of the current angles in d_
   o.timestamp_s = sim_time();
-  // Camera frames (C270 on the Pi) are published by the perception stage (M5).
+  if (camera_) {
+    mj_camlight(m_, d_);
+    const CameraObservation self = self_view_->capture(m_, d_);  // pose, intrinsics and the robot's own pixels
+    CameraObservation c;
+    camera_->grab(c);
+    if (c.rgb.width == self.rgb.width && c.rgb.height == self.rgb.height) {
+      c.intrinsics = self.intrinsics;
+      c.camera_pose = self.camera_pose;
+      if (depth_ && depth_->estimate(c))
+        for (size_t i = 0; i < c.depth_m.size(); ++i)
+          if (self.depth_m[i] > 0) c.depth_m[i] = 0;  // the gripper itself: too near for the depth network
+    }
+    c.timestamp_s = o.timestamp_s;
+    o.cameras.push_back(std::move(c));
+  }
   return o;
 }
 

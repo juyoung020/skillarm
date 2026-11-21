@@ -18,8 +18,9 @@ set_target_properties(mujoco PROPERTIES
 
 add_library(skillarm_core
   src/core/calibration.cpp
-  src/core/stl.cpp)
-target_include_directories(skillarm_core PUBLIC include src)
+  src/core/stl.cpp
+  src/core/stb_impl.cpp)
+target_include_directories(skillarm_core PUBLIC include src third_party)
 
 add_library(skillarm_sim
   src/sim/so101_model.cpp
@@ -40,9 +41,9 @@ target_include_directories(skillarm_harness PUBLIC third_party)
 target_link_libraries(skillarm_harness PUBLIC skillarm_sim skillarm_kin skillarm_real)
 target_compile_definitions(skillarm_harness PRIVATE SKILLARM_ROOT="${CMAKE_SOURCE_DIR}")
 
-add_library(skillarm_real src/real/arm_client.cpp src/real/real_so101.cpp)
+add_library(skillarm_real src/real/arm_client.cpp src/real/camera_client.cpp src/real/real_so101.cpp)
 target_include_directories(skillarm_real PUBLIC include src third_party)
-target_link_libraries(skillarm_real PUBLIC skillarm_core mujoco ws2_32)
+target_link_libraries(skillarm_real PUBLIC skillarm_core skillarm_sim mujoco ws2_32)
 
 add_library(skillarm_perceive src/perceive/clip_tokenizer.cpp src/perceive/depth_shift.cpp src/perceive/onnx_bake.cpp)
 target_include_directories(skillarm_perceive PUBLIC include src third_party)

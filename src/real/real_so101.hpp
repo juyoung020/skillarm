@@ -11,7 +11,10 @@
 
 #include "core/calibration.hpp"
 #include "env/adapter.hpp"
+#include "api/segmenter.hpp"
 #include "real/arm_client.hpp"
+#include "real/camera_client.hpp"
+#include "sim/sim_camera.hpp"
 
 namespace skillarm {
 
@@ -22,11 +25,20 @@ struct RealTask {
   int max_steps = 1500;
 };
 
+// The wrist C270 behind the Pi camera server (servo/camera.cpp). Published as camera "wrist": pose from the joint
+// angles and the model's "wrist" camera (CAD mount pose), intrinsics from its fovy, metric depth from `depth`
+// (anchored to the desk plane), and the gripper's own pixels -- rendered from the model -- carry no depth.
+struct RealCamera {
+  std::string host;  // empty: no camera
+  int port = 7756;
+  DepthEstimator* depth = nullptr;
+};
+
 class RealSo101 final : public EnvironmentAdapter {
  public:
   // judge: host-side success label (the real arm has no ground truth); called once by task_success().
   RealSo101(const std::string& host, int port, const std::string& calibration_json, const std::string& scene_xml,
-            RealTask task, std::function<bool()> judge);
+            RealTask task, std::function<bool()> judge, RealCamera camera = {});
   ~RealSo101() override;
 
   std::string embodiment() const override { return "so101_real"; }
@@ -47,6 +59,9 @@ class RealSo101 final : public EnvironmentAdapter {
   void refresh();  // state request -> cached joint angles
 
   ArmClient arm_;
+  std::unique_ptr<CameraClient> camera_;
+  std::unique_ptr<SimCamera> self_view_;  // the robot rendered from the wrist camera (world geoms hidden)
+  DepthEstimator* depth_ = nullptr;
   Calibration cal_;
   RealTask task_;
   std::function<bool()> judge_;

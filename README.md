@@ -14,6 +14,9 @@ C++/CUDA, native Windows, SO-101.
 > vision-only pick (`examples/pick_cube_vision.cpp`) succeeds on 7/10 seeds. ASPIRE's skill helper scripts (campaign setup,
 > progress, held-out validation, skill-report and skill-library lint, watchdog, evolutionary-search evaluation) are
 > `skillarm` subcommands in C++ ([`docs/03_skill_scripts_spec.md`](docs/03_skill_scripts_spec.md)).
+> The real wrist C270 streams MJPEG from the Pi (8–15 ms a frame); a real observation (joint angles, frame, camera pose
+> from FK and the mount CAD, MoGe-2 depth with the gripper masked) takes ~65 ms. Real depth is consistent (flat surfaces
+> fit a plane to 1.5–2.3 mm RMS) but its absolute scale is only checked once the camera looks at the desk.
 > Milestones: [`docs/02_design.md`](docs/02_design.md).
 
 ## Idea
@@ -34,7 +37,7 @@ ASPIRE targets Linux, Python, big GPUs and research robots. **skillarm** rebuild
 | Motion / collision | cuRobo | joint-space interpolation + MuJoCo collision check of every waypoint against the desk |
 | Simulator | LIBERO, Robosuite, Isaac (BEHAVIOR) | **MuJoCo C API** with the official SO-101 model |
 | Real hardware | YAM driver | Raspberry Pi 4 + C++ servo server (`servo/`) with path checks, rate limit and collision stop |
-| Camera / depth | multiple RGB-D | one Logitech C270 + monocular metric depth network (MoGe-2 on TensorRT) |
+| Camera / depth | multiple RGB-D | one Logitech C270 on the wrist + monocular metric depth network (MoGe-2 on TensorRT) |
 | Agent loop, trace, skills | `.claude/skills/*/SKILL.md`, verifier | **same formats** — Claude Code reads and writes them unchanged |
 
 ## Plan
@@ -71,6 +74,9 @@ C++/CUDA, 윈도우 네이티브, SO-101.
 > 2.3–3.4 % 차이, 카메라만 쓰는 집기 예제(`examples/pick_cube_vision.cpp`)는 10개 중 7개 성공. ASPIRE 스킬 보조
 > 스크립트(캠페인 생성, 진행표, 보류 시드 검증, 스킬 보고서·스킬 라이브러리 검사, 감시, 진화 탐색 평가)는 C++ `skillarm`
 > 하위 명령입니다([`docs/03_skill_scripts_spec.md`](docs/03_skill_scripts_spec.md)).
+> 실제 손목 C270은 파이에서 MJPEG로 받습니다(한 장 8–15 ms). 실물 관측 한 번(관절각, 화면, 순기구학과 마운트 CAD로 구한
+> 카메라 자세, 그리퍼를 가린 MoGe-2 깊이)은 약 65 ms. 실물 깊이는 모양이 맞고(평면이 1.5–2.3 mm RMS로 평평) 절대 축척은
+> 카메라가 책상을 볼 때 확인합니다.
 > 단계 표: [`docs/02_design.md`](docs/02_design.md).
 
 - NVIDIA [ASPIRE](https://github.com/NVlabs/ASPIRE)는 로봇 "학습"을 가중치 대신 **스킬 md를 다듬는 일**로 바꿨습니다.
