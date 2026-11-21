@@ -139,7 +139,13 @@ void Recorder::span_end(int span, bool ok, const json& input, const json& output
 }
 
 void Recorder::step(const json& rec) { steps_ << rec.dump() << "\n"; steps_.flush(); }
-void Recorder::reset_info(const json& j) { write_json("episode/reset.json", j); }
+void Recorder::reset_info(const json& j) {
+  write_json("episode/reset.json", j);
+  if (j.contains("episode_max_steps")) {  // run identity for validation / evo-eval (docs/03 §0.4)
+    run_["capture"]["episode_max_steps"] = j["episode_max_steps"];
+    write_json("run.json", run_);
+  }
+}
 void Recorder::stdout_line(const std::string& s) { out_ << s << "\n"; out_.flush(); }
 void Recorder::stderr_line(const std::string& s) { err_ << s << "\n"; err_.flush(); }
 void Recorder::time_bucket(const std::string& name, double seconds) {

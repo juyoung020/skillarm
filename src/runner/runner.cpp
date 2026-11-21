@@ -85,7 +85,7 @@ fs::path compile_program(const fs::path& src, const fs::path& build_dir) {
   const fs::path log = build_dir / "compile.log";
   const std::string vs = "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat";
   const std::string inc = std::string(SKILLARM_ROOT) + "/include";
-  const fs::path script = build_dir / "compile.cmd";
+  const fs::path script = fs::absolute(build_dir / "compile.cmd").make_preferred();
   {
     std::ofstream c(script);
     c << "@echo off\r\ncall \"" << vs << "\" >nul\r\n"
@@ -94,7 +94,7 @@ fs::path compile_program(const fs::path& src, const fs::path& build_dir) {
       << log.string() << "\" 2>&1\r\nexit /b %errorlevel%\r\n";
   }
   if (fs::exists(dll)) fs::remove(dll);
-  const int rc = std::system(("cmd /c \"" + script.string() + "\"").c_str());
+  const int rc = std::system(("cmd /c \"\"" + script.string() + "\"\"").c_str());  // cmd strips one quote pair
   if (rc != 0 || !fs::exists(dll)) {
     std::ifstream l(log);
     std::stringstream ss;
@@ -111,7 +111,7 @@ int run_trial(const fs::path& dll, const fs::path& src, const std::string& task,
   const auto t_reset = std::chrono::steady_clock::now();
   const auto ctx = env.reset(seed);
   rec.time_bucket("reset", std::chrono::duration<double>(std::chrono::steady_clock::now() - t_reset).count());
-  rec.reset_info({{"task_id", ctx.task_id}, {"language", ctx.language}, {"seed", seed},
+  rec.reset_info({{"task_id", ctx.task_id}, {"language", ctx.language}, {"seed", seed}, {"episode_max_steps", ctx.episode_max_steps},
                   {"robot_state", {{"joint_positions", env.robot_state().joint_positions}}}});
   ApiImpl api(env, rec);
 
