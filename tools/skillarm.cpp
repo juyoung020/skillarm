@@ -27,6 +27,8 @@
 #include "real/arm_client.hpp"
 #include "sim/so101_model.hpp"
 #include "sim/path_check.hpp"
+#include "perceive/clip_tokenizer.hpp"
+#include "perceive_cmds.hpp"
 
 using namespace skillarm;
 using nlohmann::json;
@@ -267,6 +269,16 @@ int main(int argc, char** argv) {
     if (cmd == "run" && argc >= 3) return run_cmd(argv[0], rest);
     if (cmd == "trial" && argc >= 7) return run_trial(argv[2], argv[3], argv[4], std::atoi(argv[5]), argv[6]);
     if (cmd == "sim-selftest") return sim_selftest(argc > 2 ? std::atoi(argv[2]) : 10);
+    if (cmd == "depth-shift-test") return cmd_depth_shift_test();
+    if (cmd == "sam3") return cmd_sam3(rest);
+    if (cmd == "depth") return cmd_depth(rest);
+    if (cmd == "tokenize" && argc >= 3) {  // SAM3 text prompt -> CLIP token ids
+      ClipTokenizer tok(std::string(SKILLARM_ROOT) + "/models/onnx/sam3/tokenizer.json");
+      const auto e = tok.encode(argv[2]);
+      for (size_t i = 0; i < e.ids.size() && e.attention_mask[i]; ++i) std::printf("%lld ", (long long)e.ids[i]);
+      std::printf("\n");
+      return 0;
+    }
     if (cmd == "jaw-geom") {
       // Fingertip collision boxes from the jaw meshes: bounding box (in the owning body frame) of the mesh vertices
       // within 40 mm of the tip. Prints MJCF <geom> lines.

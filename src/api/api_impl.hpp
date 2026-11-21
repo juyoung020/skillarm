@@ -6,18 +6,11 @@
 
 #include "env/adapter.hpp"
 #include "kin/kinematics.hpp"
+#include "api/segmenter.hpp"
 #include "record/recorder.hpp"
 #include "skillarm/api.hpp"
 
 namespace skillarm {
-
-// Perception provider (TensorRT SAM3 etc.). Optional: without one, segmentation tools report PROVIDER_UNAVAILABLE.
-class Segmenter {
- public:
-  virtual ~Segmenter() = default;
-  virtual SegmentationSet segment_text(const CameraObservation& cam, const std::string& text) = 0;
-  virtual SegmentationSet segment_points(const CameraObservation& cam, const std::vector<std::array<double, 2>>& pts) = 0;
-};
 
 class ApiImpl final : public Api {
  public:
