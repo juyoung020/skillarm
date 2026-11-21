@@ -8,6 +8,8 @@
 // Real arm address: SKILLARM_ARM=host:port (default 100.115.242.117:7755).
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <filesystem>
 #include <random>
 #include <cstdio>
 #include <cstdlib>
@@ -16,7 +18,10 @@
 #include <thread>
 #include <vector>
 
+#include "api/api_impl.hpp"
+#include "env/sim_pick_cube.hpp"
 #include "kin/kinematics.hpp"
+#include "runner/runner.hpp"
 #include "real/arm_client.hpp"
 #include "sim/so101_model.hpp"
 #include "sim/path_check.hpp"
@@ -141,6 +146,92 @@ int ik_test(int n) {
   return 0;
 }
 
+// skillarm run program.cpp [--task pick_cube] [--seeds 0,1,2] [--out runs/name]
+int run_cmd(const char* self, const std::vector<std::string>& a) {
+  namespace fs = std::filesystem;
+  const fs::path src = a[0];
+  std::string task = "pick_cube", seeds_s = "0,1,2,3,4";
+  fs::path out = fs::path("runs") / src.stem();
+  for (size_t i = 1; i + 1 < a.size(); i += 2) {
+    if (a[i] == "--task") task = a[i + 1];
+    if (a[i] == "--seeds") seeds_s = a[i + 1];
+    if (a[i] == "--out") out = a[i + 1];
+  }
+  const auto why = check_program_source(src);
+  if (!why.empty()) { std::printf("program rejected: %s\n", why.c_str()); return 1; }
+  const auto t0 = std::chrono::steady_clock::now();
+  const auto dll = compile_program(src, out / "build");
+  std::printf("compiled in %.1f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+  int ok = 0, n = 0;
+  std::stringstream ss(seeds_s);
+  std::string tok;
+  while (std::getline(ss, tok, ',')) {
+    ++n;
+    // each seed in its own process: a crashing program cannot take the harness down
+    const std::string cmdline = "\"" + std::string(self) + "\" trial \"" + dll.string() + "\" \"" + fs::absolute(src).string() +
+                                "\" " + task + " " + tok + " \"" + out.string() + "\"";
+    const int rc = std::system(("\"" + cmdline + "\"").c_str());
+    if (rc == 0) ++ok;
+    else if (rc != 1) std::printf("seed %s: trial process crashed (exit %d)\n", tok.c_str(), rc);
+  }
+  std::printf("success %d / %d\n", ok, n);
+  return ok == n ? 0 : 1;
+}
+
+// Host-only physics check with ground-truth cube positions (not an agent program): approach, descend, grasp, lift.
+int sim_selftest(int seeds) {
+  int ok = 0;
+  for (int seed = 0; seed < seeds; ++seed) {
+    SimPickCube env(std::string(SKILLARM_ROOT) + "/models/so101/task_pick_cube.xml");
+    env.reset(seed);
+    Recorder rec(std::filesystem::path("runs/selftest"), "selftest", "pick_cube", seed, {});
+    ApiImpl impl(env, rec);
+    Api& api = impl;
+    const auto c = env.cube_position();
+    // Tool orientation: home (pointing down) rotated about z. The jaws close along the tool frame's +z axis and the
+    // tool centre point sits on the fixed jaw's inner face, so: align +z with a cube face normal and shift the tool
+    // centre back by half the cube width.
+    const auto home_q = Kinematics(env.planning_model()).fk(env.home()).quaternion_wxyz;
+    auto closing_dir = [](const Quat& q) {  // third column of the rotation matrix
+      const double w = q[0], x = q[1], y = q[2], z = q[3];
+      return Vec3d{2 * (x * z + y * w), 2 * (y * z - x * w), 1 - 2 * (x * x + y * y)};
+    };
+    const auto c0 = closing_dir(home_q);
+    const double a0 = std::atan2(c0[1], c0[0]);
+    const double radial = std::atan2(c[1], c[0]);
+    double yaw = 0, best = 1e9;
+    for (int k = -4; k <= 4; ++k) {
+      const double cand = env.cube_yaw() + k * 3.14159265358979 / 2 - a0;
+      const double d = std::fabs(std::remainder(cand - radial, 2 * 3.14159265358979));
+      if (d < best) { best = d; yaw = cand; }
+    }
+    const Quat q = quat_mul(Quat{std::cos(yaw / 2), 0, 0, std::sin(yaw / 2)}, home_q);
+    const auto cl = closing_dir(q);
+    const double half = 0.015 + 0.002;
+    Pose above;
+    above.position = {c[0] - cl[0] * half, c[1] - cl[1] * half, c[2] + 0.045};  // top-down reachable below ~6 cm
+    above.quaternion_wxyz = q;
+    Pose grasp = above;
+    grasp.position[2] = c[2] + 0.004;
+    Pose lift = above;
+    lift.position[2] = c[2] + 0.09;
+    lift.quaternion_wxyz = {0, 0, 0, 0};  // position only: the 5-joint arm tilts the tool to reach higher
+    api.open_gripper();
+    const auto r1 = api.move_to_pose(above, 0.01, 300);
+    const auto r2 = api.move_to_pose(grasp, 0.01, 200);
+    api.close_gripper();
+    const auto r3 = api.move_to_pose(lift, 0.02, 300);
+    const bool s = env.task_success();
+    ok += s;
+    std::printf("seed %d cube (%.3f, %.3f): above %s, grasp %s, lift %s -> %s (cube z %.3f)\n", seed, c[0], c[1],
+                r1.ok ? "ok" : r1.error.code.c_str(), r2.ok ? "ok" : r2.error.code.c_str(),
+                r3.ok ? "ok" : r3.error.code.c_str(), s ? "SUCCESS" : "fail", env.cube_position()[2]);
+    rec.finalize({{"task_success", s}});
+  }
+  std::printf("selftest %d / %d\n", ok, seeds);
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -156,6 +247,67 @@ int main(int argc, char** argv) {
       return v.safe ? 0 : 1;
     }
     if (cmd == "arm") return arm_cmd(rest);
+    if (cmd == "run" && argc >= 3) return run_cmd(argv[0], rest);
+    if (cmd == "trial" && argc >= 7) return run_trial(argv[2], argv[3], argv[4], std::atoi(argv[5]), argv[6]);
+    if (cmd == "sim-selftest") return sim_selftest(argc > 2 ? std::atoi(argv[2]) : 10);
+    if (cmd == "jaw-geom") {
+      // Fingertip collision boxes from the jaw meshes: bounding box (in the owning body frame) of the mesh vertices
+      // within 40 mm of the tip. Prints MJCF <geom> lines.
+      So101Model sim(std::string(SKILLARM_ROOT) + "/models/so101/scene.xml");
+      const mjModel* m = sim.model();
+      for (const char* body : {"gripper", "moving_jaw_so101_v1"}) {
+        const int b = mj_name2id(m, mjOBJ_BODY, body);
+        const char* want = std::string(body) == "gripper" ? "wrist_roll_follower_so101_v1" : "moving_jaw_so101_v1";
+        for (int g = 0; g < m->ngeom; ++g) {
+          if (m->geom_bodyid[g] != b || m->geom_type[g] != mjGEOM_MESH || m->geom_contype[g] == 0) continue;
+          const int mesh = m->geom_dataid[g];
+          if (std::string(mj_id2name(m, mjOBJ_MESH, mesh)) != want) continue;
+          // geom-frame vertices -> body frame
+          double R[9];
+          mju_quat2Mat(R, m->geom_quat + 4 * g);
+          const mjtNum* gp = m->geom_pos + 3 * g;
+          std::vector<std::array<double, 3>> v;
+          for (int i = 0; i < m->mesh_vertnum[mesh]; ++i) {
+            const float* p = m->mesh_vert + 3 * (m->mesh_vertadr[mesh] + i);
+            v.push_back({R[0] * p[0] + R[1] * p[1] + R[2] * p[2] + gp[0], R[3] * p[0] + R[4] * p[1] + R[5] * p[2] + gp[1],
+                         R[6] * p[0] + R[7] * p[1] + R[8] * p[2] + gp[2]});
+          }
+          // tip = vertex farthest from the body origin; keep vertices within 40 mm of the tip along that direction
+          double tipd = 0;
+          std::array<double, 3> dir{};
+          for (auto& p : v) {
+            const double d = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+            if (d > tipd) { tipd = d; dir = {p[0] / d, p[1] / d, p[2] / d}; }
+          }
+          double lo[3] = {1e9, 1e9, 1e9}, hi[3] = {-1e9, -1e9, -1e9};
+          for (auto& p : v) {
+            if (p[0] * dir[0] + p[1] * dir[1] + p[2] * dir[2] < tipd - 0.040) continue;
+            for (int k = 0; k < 3; ++k) { lo[k] = std::min(lo[k], p[k]); hi[k] = std::max(hi[k], p[k]); }
+          }
+          std::printf("%s (%s): tip dir (%.2f %.2f %.2f) at %.1f mm\n  <geom name=\"%s_pad\" type=\"box\" pos=\"%.4f %.4f %.4f\" size=\"%.4f %.4f %.4f\"/>\n",
+                      body, want, dir[0], dir[1], dir[2], tipd * 1000, body, (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2,
+                      (lo[2] + hi[2]) / 2, (hi[0] - lo[0]) / 2, (hi[1] - lo[1]) / 2, (hi[2] - lo[2]) / 2);
+        }
+      }
+      return 0;
+    }
+    if (cmd == "ik-probe") {
+      SimPickCube env(std::string(SKILLARM_ROOT) + "/models/so101/task_pick_cube.xml");
+      Kinematics kin(env.planning_model());
+      const auto hp = kin.fk(env.home());
+      std::printf("home tcp (%.3f %.3f %.3f) q(%.3f %.3f %.3f %.3f)\n", hp.position[0], hp.position[1], hp.position[2],
+                  hp.quaternion_wxyz[0], hp.quaternion_wxyz[1], hp.quaternion_wxyz[2], hp.quaternion_wxyz[3]);
+      for (double r : {0.15, 0.2, 0.25})
+        for (double z : {0.02, 0.06, 0.10, 0.14, 0.18}) {
+          Pose t; t.position = {r, 0, z}; t.quaternion_wxyz = hp.quaternion_wxyz;
+          auto a = kin.ik(t, env.home());
+          Pose tp = t; tp.quaternion_wxyz = {0, 0, 0, 0};
+          auto b = kin.ik(tp, env.home());
+          std::printf("r %.2f z %.2f: full %s %.1f mm %.1f deg | pos-only %s %.1f mm\n", r, z, a.ok ? "ok" : "--",
+                      a.position_error_m * 1000, a.orientation_error_rad * 57.3, b.ok ? "ok" : "--", b.position_error_m * 1000);
+        }
+      return 0;
+    }
     if (cmd == "ik-test") return ik_test(argc > 2 ? std::atoi(argv[2]) : 1000);
     std::fprintf(stderr, "usage: skillarm path-check \"<6 servo positions>\" j:pos ... | skillarm arm ...\n");
     return 2;

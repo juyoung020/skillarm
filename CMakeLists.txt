@@ -30,12 +30,21 @@ target_compile_definitions(skillarm_sim PRIVATE SKILLARM_ROOT="${CMAKE_SOURCE_DI
 add_library(skillarm_kin src/kin/kinematics.cpp)
 target_link_libraries(skillarm_kin PUBLIC skillarm_core mujoco)
 
+add_library(skillarm_harness
+  src/env/sim_pick_cube.cpp
+  src/record/recorder.cpp
+  src/api/api_impl.cpp
+  src/runner/runner.cpp)
+target_include_directories(skillarm_harness PUBLIC third_party)
+target_link_libraries(skillarm_harness PUBLIC skillarm_kin)
+target_compile_definitions(skillarm_harness PRIVATE SKILLARM_ROOT="${CMAKE_SOURCE_DIR}")
+
 add_library(skillarm_real src/real/arm_client.cpp)
 target_include_directories(skillarm_real PUBLIC include src third_party)
 target_link_libraries(skillarm_real PUBLIC ws2_32)
 
 add_executable(skillarm tools/skillarm.cpp)
-target_link_libraries(skillarm PRIVATE skillarm_sim skillarm_kin skillarm_real)
+target_link_libraries(skillarm PRIVATE skillarm_sim skillarm_kin skillarm_harness skillarm_real)
 target_compile_definitions(skillarm PRIVATE SKILLARM_ROOT="${CMAKE_SOURCE_DIR}")
 add_custom_command(TARGET skillarm POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different ${MUJOCO_DIR}/bin/mujoco.dll $<TARGET_FILE_DIR:skillarm>)
