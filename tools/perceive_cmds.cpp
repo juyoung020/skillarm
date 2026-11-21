@@ -9,11 +9,14 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <random>
 #include <string>
 #include <vector>
 
+#include "env/sim_pick_cube.hpp"
 #include "perceive/depth_shift.hpp"
+#include "runner/runner.hpp"
 
 #pragma warning(push, 0)
 #define STB_IMAGE_IMPLEMENTATION
@@ -172,4 +175,180 @@ int cmd_sam3(const std::vector<std::string>&) { std::printf("built without GPU p
 int cmd_depth(const std::vector<std::string>&) { std::printf("built without GPU perception\n"); return 1; }
 #endif
 
+namespace {
+struct Backproject {
+  double R[9], t[3], fx, fy, cx, cy;
+  explicit Backproject(const CameraObservation& c) {
+    const mjtNum q[4] = {c.camera_pose.quaternion_wxyz[0], c.camera_pose.quaternion_wxyz[1],
+                         c.camera_pose.quaternion_wxyz[2], c.camera_pose.quaternion_wxyz[3]};
+    mju_quat2Mat(R, q);
+    for (int i = 0; i < 3; ++i) t[i] = c.camera_pose.position[size_t(i)];
+    fx = c.intrinsics[0], fy = c.intrinsics[4], cx = c.intrinsics[2], cy = c.intrinsics[5];
+  }
+  std::array<double, 3> world(double u, double v, double z) const {
+    const double x = (u - cx) * z / fx, y = (v - cy) * z / fy;
+    return {R[0] * x + R[1] * y + R[2] * z + t[0], R[3] * x + R[4] * y + R[5] * z + t[1],
+            R[6] * x + R[7] * y + R[8] * z + t[2]};
+  }
+  std::array<double, 2> pixel(const Vec3d& p) const {  // world -> image
+    const double d[3] = {p[0] - t[0], p[1] - t[1], p[2] - t[2]};
+    const double x = R[0] * d[0] + R[3] * d[1] + R[6] * d[2], y = R[1] * d[0] + R[4] * d[1] + R[7] * d[2],
+                 z = R[2] * d[0] + R[5] * d[1] + R[8] * d[2];
+    return {fx * x / z + cx, fy * y / z + cy};
+  }
+};
+double dist3(const std::array<double, 3>& a, const Vec3d& b) {
+  return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
+}
+// centroid of the masked pixels back-projected with the given depth map
+bool mask_centroid(const Backproject& bp, const std::vector<uint8_t>& mask, const std::vector<float>& depth, int w,
+                   std::array<double, 3>& c) {
+  c = {0, 0, 0};
+  size_t n = 0;
+  for (size_t i = 0; i < mask.size(); ++i)
+    if (mask[i] && depth[i] > 0) {
+      const auto p = bp.world(double(i % size_t(w)), double(i / size_t(w)), depth[i]);
+      for (int k = 0; k < 3; ++k) c[size_t(k)] += p[size_t(k)];
+      ++n;
+    }
+  if (!n) return false;
+  for (auto& v : c) v /= double(n);
+  return true;
+}
+}  // namespace
+
+// skillarm sim-perceive [seed] [--out dir] [--net-scale]   (--net-scale: MoGe metric scale instead of the desk plane)
+//   renderer: depth at the cube pixel lands on the cube, a floor pixel lands on z = 0
+//   SAM3 (GPU): "red cube" mask -> 3-D centroid with rendered depth vs ground truth
+//   MoGe-2 (GPU): depth from the RGB alone vs rendered depth, and the cube centroid with MoGe depth
+int cmd_sim_perceive(const std::vector<std::string>& a) {
+  int seed = 0;
+  std::string out;
+  for (size_t i = 0; i < a.size(); ++i) {
+    if (a[i] == "--out" && i + 1 < a.size()) out = a[++i];
+    else if (a[i] == "--net-scale") continue;
+    else seed = std::stoi(a[i]);
+  }
+  SimPickCube env(std::string(SKILLARM_ROOT) + "/models/so101/task_pick_cube.xml");
+  env.reset(seed);
+  auto t0 = std::chrono::steady_clock::now();
+  const Observation obs = env.observe();
+  const double render_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  if (obs.cameras.empty()) { std::printf("no camera rendered\n"); return 1; }
+  const auto& cam = obs.cameras[0];
+  const int w = cam.rgb.width, h = cam.rgb.height;
+  t0 = std::chrono::steady_clock::now();
+  (void)env.observe();
+  const double render2_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("camera %s %dx%d, fx %.1f, first frame %.1f ms (context), next %.1f ms\n", cam.name.c_str(), w, h,
+              cam.intrinsics[0], render_ms, render2_ms);
+  if (!out.empty()) {
+    std::filesystem::create_directories(out);
+    stbi_write_png((out + "/rgb.png").c_str(), w, h, 3, cam.rgb.rgb.data(), w * 3);
+  }
+
+  int fails = 0;
+  const Backproject bp(cam);
+  const Vec3d cube = env.cube_position();
+  const auto px = bp.pixel(cube);
+  const int cu = int(std::lround(px[0])), cv = int(std::lround(px[1]));
+  if (cu < 0 || cv < 0 || cu >= w || cv >= h) { std::printf("cube outside the image\n"); return 1; }
+  const auto on_cube = bp.world(cu, cv, cam.depth_m[size_t(cv) * w + cu]);
+  const double e_cube = dist3(on_cube, cube);
+  // something in front of the cube (the gripper) hides its centre pixel: the hit is nearer than the cube
+  const double cube_depth = std::sqrt((cube[0] - bp.t[0]) * (cube[0] - bp.t[0]) + (cube[1] - bp.t[1]) * (cube[1] - bp.t[1]) +
+                                      (cube[2] - bp.t[2]) * (cube[2] - bp.t[2]));
+  const double hit_depth = dist3(on_cube, {bp.t[0], bp.t[1], bp.t[2]});
+  const bool occluded = !(e_cube < 0.03) && hit_depth < cube_depth - 0.03;
+  const bool ok_cube = e_cube < 0.03 || occluded;  // a surface point of a 3 cm cube
+  fails += !ok_cube;
+  std::printf("renderer: cube pixel (%d, %d) back-projects %.1f mm from the cube centre %s\n", cu, cv, 1000 * e_cube,
+              occluded ? "(occluded by the arm, skipped)" : ok_cube ? "ok" : "FAIL");
+  const auto floor = bp.world(10, h - 10, cam.depth_m[size_t(h - 10) * w + 10]);
+  const bool ok_floor = std::fabs(floor[2]) < 0.002;
+  fails += !ok_floor;
+  std::printf("renderer: bottom-left pixel back-projects to z = %+.2f mm %s\n", 1000 * floor[2], ok_floor ? "ok" : "FAIL");
+
+#ifdef SKILLARM_GPU
+  gpu_init();
+  Sam3Options so;
+  so.dir = std::string(SKILLARM_ROOT) + "/models/onnx/sam3";
+  so.variant = "_fp16";
+  Sam3Segmenter seg(so);
+  auto r = seg.segment_text(cam, "red cube");
+  r = seg.segment_text(cam, "red cube");  // warm
+  if (!r.ok || r.items.empty()) { std::printf("SAM3: no cube found\n"); return 1; }
+  const auto& m = r.items[0];
+  std::array<double, 3> c{};
+  mask_centroid(bp, m.mask, cam.depth_m, w, c);
+  const double e_seg = dist3(c, cube);
+  const bool ok_seg = e_seg < 0.02;
+  fails += !ok_seg;
+  std::printf("SAM3: score %.3f, mask centroid (rendered depth) %.1f mm from the cube centre %s\n", m.score,
+              1000 * e_seg, ok_seg ? "ok" : "FAIL");
+
+  MogeOptions mo;
+  mo.onnx = std::string(SKILLARM_ROOT) + "/models/onnx/moge2/moge2_vits_normal.onnx";
+  mo.width = w;
+  mo.height = h;
+  if (std::find(a.begin(), a.end(), "--net-scale") == a.end()) mo.desk_z = 0;  // desk = z 0 in the base frame
+  MogeDepth net(mo);
+  CameraObservation est = cam;
+  est.depth_m.clear();
+  net.estimate(est);
+  net.estimate(est);  // warm
+  std::vector<double> rel;
+  for (size_t i = 0; i < est.depth_m.size(); ++i)
+    if (est.depth_m[i] > 0 && cam.depth_m[i] > 0) rel.push_back(std::fabs(est.depth_m[i] - cam.depth_m[i]) / cam.depth_m[i]);
+  std::sort(rel.begin(), rel.end());
+  const double med = rel.empty() ? 1 : rel[rel.size() / 2], p90 = rel.empty() ? 1 : rel[rel.size() * 9 / 10];
+  {  // shape only: error left after the best single scale factor
+    std::vector<double> ratio, rel2;
+    for (size_t i = 0; i < est.depth_m.size(); ++i)
+      if (est.depth_m[i] > 0 && cam.depth_m[i] > 0) ratio.push_back(cam.depth_m[i] / est.depth_m[i]);
+    std::nth_element(ratio.begin(), ratio.begin() + ptrdiff_t(ratio.size() / 2), ratio.end());
+    const double k = ratio.empty() ? 1 : ratio[ratio.size() / 2];
+    for (size_t i = 0; i < est.depth_m.size(); ++i)
+      if (est.depth_m[i] > 0 && cam.depth_m[i] > 0) rel2.push_back(std::fabs(k * est.depth_m[i] - cam.depth_m[i]) / cam.depth_m[i]);
+    std::sort(rel2.begin(), rel2.end());
+    if (!rel2.empty())
+      std::printf("MoGe-2 shape: true/estimated scale %.3f, error after rescaling median %.1f %% / p90 %.1f %%\n", k,
+                  100 * rel2[rel2.size() / 2], 100 * rel2[rel2.size() * 9 / 10]);
+  }
+  std::array<double, 3> cm{};
+  const bool have = mask_centroid(bp, m.mask, est.depth_m, w, cm);
+  const double e_moge = have ? dist3(cm, cube) : 1;
+  const bool ok_moge = med < 0.05 && e_moge < 0.04;  // desk-anchored metric depth, cube found within 4 cm
+  fails += !ok_moge;
+  std::printf("MoGe-2: %.1f ms, depth error median %.1f %% / p90 %.1f %%, cube centroid %.1f mm off %s\n", net.last_ms(),
+              100 * med, 100 * p90, 1000 * e_moge, ok_moge ? "ok" : "FAIL");
+  if (!out.empty()) {
+    std::vector<uint8_t> vis = cam.rgb.rgb;
+    for (size_t i = 0; i < m.mask.size(); ++i)
+      if (m.mask[i]) { vis[3 * i] = 40; vis[3 * i + 1] = 220; vis[3 * i + 2] = 40; }
+    stbi_write_png((out + "/sam3.png").c_str(), w, h, 3, vis.data(), w * 3);
+    std::vector<uint8_t> err(size_t(w) * h, 0);  // white = 10 % error or more
+    for (size_t i = 0; i < err.size(); ++i)
+      if (est.depth_m[i] > 0 && cam.depth_m[i] > 0)
+        err[i] = uint8_t(std::min(255.0, 2550.0 * std::fabs(est.depth_m[i] - cam.depth_m[i]) / cam.depth_m[i]));
+    stbi_write_png((out + "/moge_error.png").c_str(), w, h, 1, err.data(), w);
+  }
+#else
+  std::printf("SAM3 / MoGe-2 checks need the GPU build\n");
+#endif
+  return fails ? 1 : 0;
+}
+
+
+void register_perception() {
+#ifdef SKILLARM_GPU
+  set_segmenter_factory([]() -> std::unique_ptr<Segmenter> {
+    gpu_init();
+    Sam3Options o;
+    o.dir = std::string(SKILLARM_ROOT) + "/models/onnx/sam3";
+    o.variant = "_fp16";  // same masks as fp32 on the cube scenes, about 4x faster
+    return std::make_unique<Sam3Segmenter>(o);
+  });
+#endif
+}
 }  // namespace skillarm

@@ -23,8 +23,9 @@ target_include_directories(skillarm_core PUBLIC include src)
 
 add_library(skillarm_sim
   src/sim/so101_model.cpp
-  src/sim/path_check.cpp)
-target_link_libraries(skillarm_sim PUBLIC skillarm_core mujoco)
+  src/sim/path_check.cpp
+  src/sim/sim_camera.cpp)
+target_link_libraries(skillarm_sim PUBLIC skillarm_core mujoco opengl32)
 target_compile_definitions(skillarm_sim PRIVATE SKILLARM_ROOT="${CMAKE_SOURCE_DIR}")
 
 add_library(skillarm_kin src/kin/kinematics.cpp)
@@ -36,14 +37,14 @@ add_library(skillarm_harness
   src/api/api_impl.cpp
   src/runner/runner.cpp)
 target_include_directories(skillarm_harness PUBLIC third_party)
-target_link_libraries(skillarm_harness PUBLIC skillarm_kin skillarm_real)
+target_link_libraries(skillarm_harness PUBLIC skillarm_sim skillarm_kin skillarm_real)
 target_compile_definitions(skillarm_harness PRIVATE SKILLARM_ROOT="${CMAKE_SOURCE_DIR}")
 
 add_library(skillarm_real src/real/arm_client.cpp src/real/real_so101.cpp)
 target_include_directories(skillarm_real PUBLIC include src third_party)
 target_link_libraries(skillarm_real PUBLIC skillarm_core mujoco ws2_32)
 
-add_library(skillarm_perceive src/perceive/clip_tokenizer.cpp src/perceive/depth_shift.cpp)
+add_library(skillarm_perceive src/perceive/clip_tokenizer.cpp src/perceive/depth_shift.cpp src/perceive/onnx_bake.cpp)
 target_include_directories(skillarm_perceive PUBLIC include src third_party)
 
 # GPU perception (SAM3 + MoGe-2 on TensorRT, CUDA pre/post-processing). Built when CUDA and TensorRT are found.

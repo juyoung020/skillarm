@@ -105,7 +105,16 @@ Observation SimPickCube::observe() {
   Observation o;
   o.robot_state = robot_state();
   o.timestamp_s = d_->time;
-  // Camera rendering (RGB + depth) is added with the GPU renderer; until then no cameras are published.
+  // "scene" camera = where the C270 sits on the real desk; 640x480 like the real stream
+  if (!camera_ && !camera_failed_) {
+    try {
+      camera_ = std::make_unique<SimCamera>(m_, "scene", 640, 480);
+    } catch (const std::exception& e) {
+      camera_failed_ = true;
+      std::fprintf(stderr, "sim camera unavailable: %s\n", e.what());
+    }
+  }
+  if (camera_) o.cameras.push_back(camera_->capture(m_, d_));
   return o;
 }
 

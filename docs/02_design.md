@@ -29,7 +29,8 @@ skillarm/
   src/env/              EnvironmentAdapter 와 시뮬 과제(pick_cube)
   src/api/              에이전트 도구 24개 구현(계획·충돌 검사·파지 후보 포함)
   src/record/           ASPIRE 형식 실행 기록기
-  src/perceive/         SAM3·깊이(TensorRT, CUDA) — GPU 가 비면 추가
+  src/perceive/         SAM3·MoGe-2 깊이(TensorRT, CUDA 전·후처리), ONNX 입력 상수화
+  src/sim/sim_camera    MuJoCo 오프스크린 RGB + 미터 깊이(숨은 WGL 창)
   src/runner/           program.cpp → DLL 컴파일·로드·시드 반복 실행
   src/real/             실물 어댑터(서보 서버 TCP 클라이언트 + RealSo101)
   servo/                파이 서보 서버(C++, 리눅스) — Feetech 버스, 안전장치
@@ -51,9 +52,9 @@ skillarm/
 | M0 | CMake 뼈대, MuJoCo 로 SO-101 불러 FK, 관절 한계, 책상 간섭 검사(`ref_path_check.py` 이식) | 검사 결과가 파이썬 참고본과 같은 값 |
 | M1 | 파이 서보 서버(C++): 프로토콜, 캘리브레이션, 위치 스트림, 충돌 감지 이동 | 실제 팔 0° 자세 → 쉬는 자세 왕복 |
 | M2 | IK(CPU) | 무작위 목표 500개 중 99.6 % 성공, 오차 < 0.5 mm, 0.25 ms (완료) |
-| M3 | 시뮬 RGB-D 렌더, 장면에 물체 놓기, 과제 정의(집어 옮기기) | 키프레임 이미지 |
+| M3 | 시뮬 RGB-D 렌더, 장면에 물체 놓기, 과제 정의(집어 옮기기) | 640×480 한 장 1.5 ms, 역투영 바닥 오차 0.25 mm (완료) |
 | M4 | 도구 24개 + 실행 기록기 + program.cpp DLL 러너 | 사람이 쓴 프로그램이 과제 성공 |
-| M5 | SAM3 분할 + MoGe-2 깊이(TensorRT, CUDA 전·후처리) + 파지 후보 | 시뮬·실물 물체 마스크와 점군 |
+| M5 | SAM3 분할 + MoGe-2 깊이(TensorRT, CUDA 전·후처리) + 파지 후보 | 시뮬: `skillarm sim-perceive` 8/8, 카메라만으로 집기 7/10 (완료). 실물: C270 연결 후 |
 | M6 | 스킬 md·프롬프트 이식, 코디네이터/서브에이전트/검증 루프 | 에이전트가 실패 → 수정 → 스킬 1개 등록 |
 | M7 | 실물 어댑터(`src/real/real_so101`) + 서버 연속 추종 모드, `run --real` 은 작업자 확인 후 실행 | 같은 프로그램이 실물에서 동작 |
 | M8 | 장애물 있는 과제: 충돌 검사를 장애물 상자까지 넓힘(CPU, 필요 측정되면 그때 가속) | 장애물 있는 과제 |

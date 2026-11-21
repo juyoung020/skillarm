@@ -9,7 +9,9 @@ C++/CUDA, native Windows, SO-101.
 > checked, compiled to a DLL in ~1 s, run per seed in its own process, and leaves an ASPIRE-format run directory.
 > A scripted pick-up in MuJoCo succeeds on 10/10 seeds; IK solves 99.6 % of random 6-DoF targets at 0.25 ms each.
 > The real arm runs behind a C++ servo server on the Pi (continuous 30 Hz servo mode, blockage/overload stop with a
-> latched fault). Waiting for the GPU: SAM3 + monocular depth on TensorRT, camera rendering.
+> latched fault). Perception runs on TensorRT: SAM3 (fp16) finds the cube in 55 ms per new frame (7 ms when only the
+> text changes), MoGe-2 depth anchored to the desk plane is within 2.3–3.4 % of the rendered depth on 8/8 sim seeds, and a
+> vision-only pick (`examples/pick_cube_vision.cpp`) succeeds on 7/10 seeds.
 > Milestones: [`docs/02_design.md`](docs/02_design.md).
 
 ## Idea
@@ -62,7 +64,9 @@ C++/CUDA, 윈도우 네이티브, SO-101.
 > **상태 (2026-11-22):** 시뮬레이션 루프가 CPU만으로 처음부터 끝까지 돕니다 — 에이전트 프로그램(`program.cpp`)을 검사해
 > 약 1초에 DLL로 컴파일하고, 시드마다 별도 프로세스로 돌려 ASPIRE 형식 실행 기록을 남깁니다. MuJoCo 스크립트 집기
 > 10/10 시드 성공, IK는 무작위 6자유도 목표 99.6 %를 한 번에 0.25 ms로 풉니다. 실제 팔은 파이의 C++ 서보 서버 뒤에서
-> 움직입니다(30 Hz 연속 추종, 막힘·과부하 시 정지하고 잠금). GPU 대기: TensorRT SAM3 + 단안 깊이 모델, 카메라 렌더.
+> 움직입니다(30 Hz 연속 추종, 막힘·과부하 시 정지하고 잠금). 인식은 TensorRT로 돕니다: SAM3(fp16)가 새 화면 하나에
+> 55 ms(글자만 바뀌면 7 ms)로 큐브를 찾고, 책상 평면으로 축척을 맞춘 MoGe-2 깊이는 시뮬 시드 8개 모두 렌더 깊이와
+> 2.3–3.4 % 차이, 카메라만 쓰는 집기 예제(`examples/pick_cube_vision.cpp`)는 10개 중 7개 성공.
 > 단계 표: [`docs/02_design.md`](docs/02_design.md).
 
 - NVIDIA [ASPIRE](https://github.com/NVlabs/ASPIRE)는 로봇 "학습"을 가중치 대신 **스킬 md를 다듬는 일**로 바꿨습니다.

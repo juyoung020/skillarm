@@ -6,12 +6,14 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <stdexcept>
 #include <vector>
 
 #include "perceive/depth_shift.hpp"
 #include "perceive/kernels.hpp"
+#include "perceive/onnx_bake.hpp"
 
 namespace skillarm {
 namespace {
@@ -41,16 +43,13 @@ std::vector<float> download_float(const TensorInfo& t, cudaStream_t s) {
 
 MogeDepth::MogeDepth(MogeOptions o) : o_(std::move(o)) {
   ck(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking), "stream");
-  net_ = std::make_unique<TrtEngine>(o_.onnx,
-                                     std::map<std::string, std::vector<int64_t>>{{"image", {1, 3, o_.height, o_.width}}},
-                                     std::map<std::string, std::vector<int64_t>>{{"num_tokens", {o_.num_tokens}}});
-  auto& nt = net_->tensor("num_tokens");
-  if (nt.dev) {  // a plain device input in this export: upload once
-    const int64_t v = o_.num_tokens;
-    const int32_t v32 = int32_t(v);
-    ck(cudaMemcpy(nt.dev, nt.bytes == 8 ? static_cast<const void*>(&v) : static_cast<const void*>(&v32), nt.bytes,
-                  cudaMemcpyHostToDevice), "num_tokens");
-  }
+  // num_tokens becomes a constant in a side copy of the ONNX so TensorRT can fold the resize sizes derived from it
+  const std::string baked = o_.onnx.substr(0, o_.onnx.size() - 5) + ".tokens" + std::to_string(o_.num_tokens) + ".onnx";
+  namespace fs = std::filesystem;
+  if (!fs::exists(baked) || fs::last_write_time(baked) < fs::last_write_time(o_.onnx))
+    onnx_bake_int64_input(o_.onnx, baked, "num_tokens", {o_.num_tokens});
+  net_ = std::make_unique<TrtEngine>(baked,
+                                     std::map<std::string, std::vector<int64_t>>{{"image", {1, 3, o_.height, o_.width}}});
   ck(cudaMalloc(reinterpret_cast<void**>(&d_rgb_), size_t(o_.width) * o_.height * 3), "cudaMalloc rgb");
 }
 
@@ -58,6 +57,47 @@ MogeDepth::~MogeDepth() {
   net_.reset();
   cudaFree(d_rgb_);
   if (stream_) cudaStreamDestroy(stream_);
+}
+
+// Metric scale from the desk: with the camera pose known, every pixel's ray meets the plane z = desk_z at a known
+// depth. Most of the image is desk, so the median ratio (plane depth / relative depth), refined on the pixels that
+// agree within 3 %, is the scale; robot and objects stand above the plane and fall out as outliers.
+double MogeDepth::desk_scale(const CameraObservation& cam, const std::vector<float>& points,
+                             const std::vector<uint8_t>& valid) const {
+  const int w = cam.rgb.width, h = cam.rgb.height;
+  const auto& q = cam.camera_pose.quaternion_wxyz;
+  const double a = q[0], b = q[1], c = q[2], d = q[3];
+  const double r20 = 2 * (b * d - a * c), r21 = 2 * (c * d + a * b), r22 = 1 - 2 * (b * b + c * c);  // world z row
+  const double tz = cam.camera_pose.position[2];
+  const double fx = cam.intrinsics[0], fy = cam.intrinsics[4], cx = cam.intrinsics[2], cy = cam.intrinsics[5];
+  std::vector<double> ratio, plane;
+  std::vector<size_t> idx;
+  for (int v = 0; v < h; v += 2)
+    for (int u = 0; u < w; u += 2) {
+      const size_t i = size_t(v) * w + u;
+      if (!valid[i]) continue;
+      const double dz = r20 * (u - cx) / fx + r21 * (v - cy) / fy + r22;  // world z of the ray per unit depth
+      const double t = (o_.desk_z - tz) / dz;
+      const double z = points[3 * i + 2] + shift_;
+      if (dz >= -1e-6 || t <= 0 || z <= 0) continue;
+      ratio.push_back(t / z);
+      plane.push_back(t);
+      idx.push_back(i);
+    }
+  if (ratio.size() < 100) return 0;
+  auto median = [](std::vector<double> v) {
+    std::nth_element(v.begin(), v.begin() + ptrdiff_t(v.size() / 2), v.end());
+    return v[v.size() / 2];
+  };
+  double s = median(ratio);
+  for (int it = 0; it < 3; ++it) {
+    std::vector<double> in;
+    for (size_t k = 0; k < ratio.size(); ++k)
+      if (std::fabs(s * (points[3 * idx[k] + 2] + shift_) - plane[k]) < 0.03 * plane[k]) in.push_back(ratio[k]);
+    if (in.size() < 100) break;
+    s = median(in);
+  }
+  return s;
 }
 
 bool MogeDepth::estimate(CameraObservation& cam) {
@@ -75,6 +115,10 @@ bool MogeDepth::estimate(CameraObservation& cam) {
   std::vector<uint8_t> valid(size_t(w) * h);
   for (size_t i = 0; i < valid.size(); ++i) valid[i] = mask[i] > 0.5f && std::isfinite(points[3 * i + 2]);
   shift_ = recover_shift(points.data(), valid.data(), w, h, cam.intrinsics);
+  if (std::isfinite(o_.desk_z)) {
+    const double s = desk_scale(cam, points, valid);
+    if (s > 0) scale_ = s;
+  }
   cam.depth_m.assign(size_t(w) * h, 0.f);
   for (size_t i = 0; i < valid.size(); ++i)
     if (valid[i]) {

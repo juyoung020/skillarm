@@ -4,7 +4,9 @@
 // the reprojection error of the point map; depth = (z + shift) * scale.
 #pragma once
 #include <memory>
+#include <limits>
 #include <string>
+#include <vector>
 
 #include "api/segmenter.hpp"
 #include "perceive/trt_engine.hpp"
@@ -15,6 +17,9 @@ struct MogeOptions {
   std::string onnx;       // models/onnx/moge2/moge2_vits_normal.onnx
   int width = 640, height = 480;  // camera resolution (the engine is built for it)
   int num_tokens = 2500;  // MoGe resolution level 9 (1200..2500)
+  // Desk plane height in the camera pose frame. When set (and the camera pose is known) the metric scale comes from
+  // the desk instead of the network, which misjudges absolute size in scenes without everyday context.
+  double desk_z = std::numeric_limits<double>::quiet_NaN();
 };
 
 class MogeDepth final : public DepthEstimator {
@@ -27,6 +32,8 @@ class MogeDepth final : public DepthEstimator {
   double last_scale() const { return scale_; }
 
  private:
+  double desk_scale(const CameraObservation& cam, const std::vector<float>& points, const std::vector<uint8_t>& valid) const;
+
   MogeOptions o_;
   std::unique_ptr<TrtEngine> net_;
   cudaStream_t stream_ = nullptr;

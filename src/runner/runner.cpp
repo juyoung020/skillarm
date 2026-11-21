@@ -104,6 +104,46 @@ fs::path compile_program(const fs::path& src, const fs::path& build_dir) {
   return dll;
 }
 
+namespace {
+std::function<std::unique_ptr<Segmenter>()> g_segmenter_factory;
+
+class LazySegmenter final : public Segmenter {
+ public:
+  SegmentationSet segment_text(const CameraObservation& cam, const std::string& text) override {
+    if (Segmenter* s = get()) return s->segment_text(cam, text);
+    return unavailable();
+  }
+  SegmentationSet segment_points(const CameraObservation& cam, const std::vector<std::array<double, 2>>& pts) override {
+    if (Segmenter* s = get()) return s->segment_points(cam, pts);
+    return unavailable();
+  }
+
+ private:
+  Segmenter* get() {
+    if (!s_ && error_.empty()) {
+      if (!g_segmenter_factory) error_ = "no segmentation provider in this build";
+      else try {
+        s_ = g_segmenter_factory();
+      } catch (const std::exception& e) {
+        error_ = std::string("segmentation provider failed to load: ") + e.what();
+      }
+    }
+    return s_.get();
+  }
+  SegmentationSet unavailable() const {
+    SegmentationSet r;
+    r.error = {"PROVIDER_UNAVAILABLE", error_, false};
+    return r;
+  }
+  std::unique_ptr<Segmenter> s_;
+  std::string error_;
+};
+}  // namespace
+
+void set_segmenter_factory(std::function<std::unique_ptr<Segmenter>()> factory) {
+  g_segmenter_factory = std::move(factory);
+}
+
 int run_trial(const fs::path& dll, const fs::path& src, const std::string& task, int seed, const fs::path& out_root) {
   std::unique_ptr<EnvironmentAdapter> env_p = make_env(task);
   EnvironmentAdapter& env = *env_p;
@@ -113,7 +153,8 @@ int run_trial(const fs::path& dll, const fs::path& src, const std::string& task,
   rec.time_bucket("reset", std::chrono::duration<double>(std::chrono::steady_clock::now() - t_reset).count());
   rec.reset_info({{"task_id", ctx.task_id}, {"language", ctx.language}, {"seed", seed}, {"episode_max_steps", ctx.episode_max_steps},
                   {"robot_state", {{"joint_positions", env.robot_state().joint_positions}}}});
-  ApiImpl api(env, rec);
+  LazySegmenter seg;
+  ApiImpl api(env, rec, &seg);
 
   json outcome = {{"program_ok", false}, {"task_success", false}};
   std::string reason = "program_completed", error;

@@ -4,6 +4,7 @@
 #include <random>
 
 #include "env/adapter.hpp"
+#include "sim/sim_camera.hpp"
 
 namespace skillarm {
 
@@ -39,6 +40,8 @@ class SimPickCube final : public EnvironmentAdapter {
   TaskContext ctx_;
   int max_steps_;
   double cube_z0_ = 0.015;
+  std::unique_ptr<SimCamera> camera_;  // created on the first observe()
+  bool camera_failed_ = false;
 };
 
 }  // namespace skillarm

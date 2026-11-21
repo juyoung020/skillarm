@@ -254,6 +254,7 @@ int sim_selftest(int seeds) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  skillarm::register_perception();
   try {
     const std::string cmd = argc > 1 ? argv[1] : "";
     std::vector<std::string> rest(argv + (argc > 2 ? 2 : argc), argv + argc);
@@ -272,6 +273,7 @@ int main(int argc, char** argv) {
     if (cmd == "depth-shift-test") return cmd_depth_shift_test();
     if (cmd == "sam3") return cmd_sam3(rest);
     if (cmd == "depth") return cmd_depth(rest);
+    if (cmd == "sim-perceive") return cmd_sim_perceive(rest);
     if (cmd == "tokenize" && argc >= 3) {  // SAM3 text prompt -> CLIP token ids
       ClipTokenizer tok(std::string(SKILLARM_ROOT) + "/models/onnx/sam3/tokenizer.json");
       const auto e = tok.encode(argv[2]);
