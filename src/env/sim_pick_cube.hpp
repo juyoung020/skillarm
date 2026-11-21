@@ -8,9 +8,18 @@
 
 namespace skillarm {
 
+// The pick-up task family: one free object (body, joint and geom all named spec.object) on the desk, success when
+// it is lifted 5 cm. pick_cube = 3 cm red cube, pick_can = 355 ml can.
+struct SimTaskSpec {
+  std::string id = "pick_cube";
+  std::string name = "pick up the red cube";
+  std::string language = "Pick up the red cube from the desk and lift it at least 5 cm.";
+  std::string object = "cube";
+};
+
 class SimPickCube final : public EnvironmentAdapter {
  public:
-  explicit SimPickCube(const std::string& task_xml, int max_steps = 1500);
+  explicit SimPickCube(const std::string& task_xml, int max_steps = 1500, SimTaskSpec spec = {});
   ~SimPickCube() override;
 
   std::string embodiment() const override { return "so101_sim"; }
@@ -38,6 +47,7 @@ class SimPickCube final : public EnvironmentAdapter {
   int cube_q_ = 0, cube_body_ = -1;
   double grip_lo_ = 0, grip_hi_ = 0;
   std::vector<double> home_;
+  SimTaskSpec spec_;
   TaskContext ctx_;
   int max_steps_;
   double cube_z0_ = 0.015;

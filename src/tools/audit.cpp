@@ -9,6 +9,7 @@
 #include <mujoco/mujoco.h>
 
 #include "env/sim_pick_cube.hpp"
+#include "runner/runner.hpp"
 #include "record/recorder.hpp"
 #include "tools/common.hpp"
 #include "tools/tools.hpp"
@@ -53,14 +54,15 @@ std::string signature(const std::map<std::string, Xyz>& j) {
 int cmd_audit_seeding(const std::vector<std::string>& av) {
   Args a(av, {});
   if (a.pos.empty() || (a.pos[0] != "vary" && a.pos[0] != "repeat" && a.pos[0] != "distinct"))
-    throw Exit("usage: skillarm audit-seeding vary|repeat|distinct [--task pick_cube] [--seeds LIST] [--held-out LIST] "
+    throw Exit("usage: skillarm audit-seeding vary|repeat|distinct [--task pick_cube|pick_can] [--seeds LIST] [--held-out LIST] "
                "[--development LIST]", 2);
   const std::string check = a.pos[0], task = a.get("--task").value_or("pick_cube");
-  if (task != "pick_cube") throw Exit("unknown simulated task " + task + " (available: pick_cube)");
+  auto env_p = make_sim_task(task);
+  if (!env_p) throw Exit("unknown simulated task " + task + " (available: pick_cube, pick_can)");
   const auto seeds = parse_seed_list(a.get("--seeds").value_or("1,2,3,51,52,53"), false);
   const auto held = parse_seed_list(a.get("--held-out").value_or("1-50"), false);
   const auto dev = parse_seed_list(a.get("--development").value_or("51-80"), false);
-  SimPickCube env((repo() / "models" / "so101" / "task_pick_cube.xml").string());
+  SimPickCube& env = *env_p;
 
   if (check == "vary") {
     std::map<int, std::map<std::string, Xyz>> rows;

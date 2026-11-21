@@ -10,7 +10,7 @@ using nlohmann::json;
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;
-constexpr double kMaxOpening = 0.07;  // m, SO-101 jaws fully open (approx.)
+constexpr double kMaxOpening = 0.078;  // m, fingertip pad gap at full open (skillarm jaw-open)
 
 json jp(const Pose& p) { return {{"position", p.position}, {"quaternion_wxyz", p.quaternion_wxyz}, {"frame", p.frame}}; }
 json je(const ApiError& e) {
@@ -262,13 +262,42 @@ GraspSet ApiImpl::generate_grasps(const std::string& camera_name, const Segmenta
   if (pc.points.size() < 10) {
     gs.error = {"NOT_FOUND", "too few depth points under the mask", true};
   } else {
-    const auto g = estimate_geometry(pc);
-    double R[9];
-    quat_to_mat(g.pose.quaternion_wxyz, R);
-    // horizontal box axes (least vertical two)
-    std::vector<std::pair<double, int>> axes;
-    for (int k = 0; k < 3; ++k) axes.push_back({std::fabs(R[6 + k]), k});
-    std::sort(axes.begin(), axes.end());
+    auto g = estimate_geometry(pc);
+    // The jaws close horizontally, so what matters is the object's footprint: 2-D PCA of the points projected on
+    // the desk, widths from the 5-95 % spread along each axis. (A 3-D box of the visible surface tilts for round
+    // objects -- top disc plus one side -- and overstates both widths.)
+    double mx = 0, my = 0;
+    for (const auto& p : pc.points) { mx += p[0]; my += p[1]; }
+    mx /= double(pc.points.size());
+    my /= double(pc.points.size());
+    double sxx = 0, syy = 0, sxy = 0;
+    for (const auto& p : pc.points) {
+      sxx += (p[0] - mx) * (p[0] - mx);
+      syy += (p[1] - my) * (p[1] - my);
+      sxy += (p[0] - mx) * (p[1] - my);
+    }
+    const double th = 0.5 * std::atan2(2 * sxy, sxx - syy);  // major axis angle
+    const double ux[2] = {std::cos(th), std::sin(th)}, uy[2] = {-std::sin(th), std::cos(th)};
+    std::vector<double> s0, s1;
+    for (const auto& p : pc.points) {
+      s0.push_back((p[0] - mx) * ux[0] + (p[1] - my) * ux[1]);
+      s1.push_back((p[0] - mx) * uy[0] + (p[1] - my) * uy[1]);
+    }
+    auto spread = [](std::vector<double> v, double& mid) {
+      std::sort(v.begin(), v.end());
+      const double lo = v[size_t(0.05 * double(v.size() - 1))], hi = v[size_t(0.95 * double(v.size() - 1))];
+      mid = 0.5 * (lo + hi);
+      return hi - lo;
+    };
+    double m0 = 0, m1 = 0;
+    const double w0 = spread(s0, m0), w1 = spread(s1, m1);
+    g.pose.position[0] = mx + m0 * ux[0] + m1 * uy[0];
+    g.pose.position[1] = my + m0 * ux[1] + m1 * uy[1];
+    // R columns 0, 1 = horizontal footprint axes (major, minor), column 2 = up; extents to match
+    const double R[9] = {ux[0], uy[0], 0, ux[1], uy[1], 0, 0, 0, 1};
+    g.extents[0] = w0;
+    g.extents[1] = w1;
+    const std::vector<std::pair<double, int>> axes = {{0.0, 1}, {0.0, 0}};  // close across the minor side first
     // SO-101 jaws close along the tool frame's +z axis and the tool centre point lies on the fixed jaw's inner face
     // (measured from the meshes, see `skillarm jaw-geom`). So: rotate the downward home orientation about z until +z is
     // perpendicular to the chosen box side, then shift the tool centre back by half the object width.
@@ -279,7 +308,7 @@ GraspSet ApiImpl::generate_grasps(const std::string& camera_name, const Segmenta
     for (int pick = 0; pick < 2; ++pick) {
       const int k = axes[size_t(pick)].second;     // close across this box axis
       const double width = g.extents[size_t(k)];
-      if (width > kMaxOpening - 0.005) continue;
+      if (width > kMaxOpening - 0.006) continue;  // 3 mm clearance per side
       const double ax = std::atan2(R[3 + k], R[0 + k]);
       // of the two opposite closing directions keep the one whose yaw is nearest the radial direction (reachability)
       double yaw = 0, best = 1e9;

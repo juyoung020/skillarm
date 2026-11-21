@@ -12,5 +12,8 @@ int cmd_sim_perceive(const std::vector<std::string>& args);
 int cmd_cam(const std::vector<std::string>& args);
 int cmd_wrist_check(const std::vector<std::string>& args);
 int cmd_real_observe(const std::vector<std::string>& args);
+int cmd_cam_aim(const std::vector<std::string>& args);
+int cmd_ik_probe(const std::vector<std::string>& args);
+int cmd_jaw_open();
 void register_perception();
 }  // namespace skillarm

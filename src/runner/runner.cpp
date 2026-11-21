@@ -81,14 +81,27 @@ class LazyDepth final : public DepthEstimator {
 };
 LazyDepth g_depth;
 
+}  // namespace
+
+std::unique_ptr<SimPickCube> make_sim_task(const std::string& task) {
+  const std::string m = std::string(SKILLARM_ROOT) + "/models/so101/";
+  if (task == "pick_cube") return std::make_unique<SimPickCube>(m + "task_pick_cube.xml");
+  if (task == "pick_can")
+    return std::make_unique<SimPickCube>(
+        m + "task_pick_can.xml", 1500,
+        SimTaskSpec{"pick_can", "pick up the can", "Pick up the can from the desk and lift it at least 5 cm.", "can"});
+  return nullptr;
+}
+
+namespace {
 // Real-arm tasks need SKILLARM_REAL=1 (set by `skillarm run --real`, which asks the operator first) and the servo
 // server address in SKILLARM_ARM (default 100.115.242.117:7755).
 std::unique_ptr<EnvironmentAdapter> make_env(const std::string& task) {
   const std::string root = SKILLARM_ROOT;
-  if (task == "pick_cube") return std::make_unique<SimPickCube>(root + "/models/so101/task_pick_cube.xml");
-  if (task == "real_pick_cube") {
+  if (auto sim = make_sim_task(task)) return sim;
+  if (task == "real_pick_cube" || task == "real_pick_can") {
     const char* ok = std::getenv("SKILLARM_REAL");
-    if (!ok || std::string(ok) != "1") throw std::runtime_error("real_pick_cube needs `skillarm run --real` (operator present)");
+    if (!ok || std::string(ok) != "1") throw std::runtime_error(task + " needs `skillarm run --real` (operator present)");
     std::string addr = std::getenv("SKILLARM_ARM") ? std::getenv("SKILLARM_ARM") : "100.115.242.117:7755";
     const auto colon = addr.rfind(':');
     auto judge = [] {
@@ -99,16 +112,19 @@ std::unique_ptr<EnvironmentAdapter> make_env(const std::string& task) {
     };
     return std::make_unique<RealSo101>(addr.substr(0, colon), std::stoi(addr.substr(colon + 1)),
                                        root + "/config/so101_calibration.json", root + "/models/so101/real_desk.xml",
-                                       RealTask{}, judge, RealCamera{addr.substr(0, colon), 7756, &g_depth});
+                                       task == "real_pick_can"
+                                           ? RealTask{"real_pick_can", "pick up the can",
+                                                      "Pick up the can from the desk and lift it at least 5 cm.", 1500}
+                                           : RealTask{},
+                                       judge, RealCamera{addr.substr(0, colon), 7756, &g_depth});
   }
-  throw std::runtime_error("unknown task " + task + " (available: pick_cube, real_pick_cube)");
+  throw std::runtime_error("unknown task " + task + " (available: pick_cube, pick_can, real_pick_cube, real_pick_can)");
 }
 }  // namespace
 
 int task_episode_max_steps(const std::string& task) {
-  if (task == "pick_cube")
-    return SimPickCube(std::string(SKILLARM_ROOT) + "/models/so101/task_pick_cube.xml").task_context().episode_max_steps;
-  throw std::runtime_error("unknown simulated task " + task + " (available: pick_cube)");
+  if (auto sim = make_sim_task(task)) return sim->task_context().episode_max_steps;
+  throw std::runtime_error("unknown simulated task " + task + " (available: pick_cube, pick_can)");
 }
 
 fs::path compile_program(const fs::path& src, const fs::path& build_dir) {

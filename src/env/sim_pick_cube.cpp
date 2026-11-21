@@ -11,7 +11,8 @@ const char* kNames[6] = {"shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_f
 constexpr double kPi = 3.14159265358979323846;
 }  // namespace
 
-SimPickCube::SimPickCube(const std::string& task_xml, int max_steps) : max_steps_(max_steps) {
+SimPickCube::SimPickCube(const std::string& task_xml, int max_steps, SimTaskSpec spec)
+    : spec_(std::move(spec)), max_steps_(max_steps) {
   char err[1024] = {};
   m_ = mj_loadXML(task_xml.c_str(), nullptr, err, sizeof err);
   if (!m_) throw std::runtime_error(std::string("mj_loadXML: ") + err);
@@ -26,9 +27,13 @@ SimPickCube::SimPickCube(const std::string& task_xml, int max_steps) : max_steps
   }
   grip_lo_ = m_->actuator_ctrlrange[2 * act_[5]];
   grip_hi_ = m_->actuator_ctrlrange[2 * act_[5] + 1];
-  cube_body_ = mj_name2id(m_, mjOBJ_BODY, "cube");
-  cube_q_ = m_->jnt_qposadr[mj_name2id(m_, mjOBJ_JOINT, "cube")];
-  cube_z0_ = m_->geom_size[3 * mj_name2id(m_, mjOBJ_GEOM, "cube") + 2];
+  const char* obj = spec_.object.c_str();
+  cube_body_ = mj_name2id(m_, mjOBJ_BODY, obj);
+  const int jid = mj_name2id(m_, mjOBJ_JOINT, obj), gid = mj_name2id(m_, mjOBJ_GEOM, obj);
+  if (cube_body_ < 0 || jid < 0 || gid < 0) throw std::runtime_error("task model has no object " + spec_.object);
+  cube_q_ = m_->jnt_qposadr[jid];
+  // resting height of the centre: box half-height, or cylinder half-length
+  cube_z0_ = m_->geom_size[3 * gid + (m_->geom_type[gid] == mjGEOM_CYLINDER ? 1 : 2)];
 
   // Home: upper arm vertical, forearm horizontal, wrist bent so the gripper points down (pick the sign that
   // lowers the tool), jaws open. Chosen from the model, not hand-tuned numbers.
@@ -76,9 +81,9 @@ TaskContext SimPickCube::reset(int seed) {
   for (int i = 0; i < 100; ++i) mj_step(m_, d_);  // settle
 
   ctx_ = {};
-  ctx_.task_id = "pick_cube";
-  ctx_.task_name = "pick up the red cube";
-  ctx_.language = "Pick up the red cube from the desk and lift it at least 5 cm.";
+  ctx_.task_id = spec_.id;
+  ctx_.task_name = spec_.name;
+  ctx_.language = spec_.language;
   ctx_.episode_max_steps = max_steps_;
   ctx_.episode_steps_used = 0;
   return ctx_;

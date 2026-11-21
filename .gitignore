@@ -8,3 +8,4 @@ ref/
 runs/
 third_party/mujoco/
 models/onnx/
+build-co/

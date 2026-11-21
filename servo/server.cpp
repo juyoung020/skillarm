@@ -11,7 +11,7 @@
 //                                               then {"ev":"move_done"} or {"ev":"move_aborted","reason":...}
 //   {"cmd":"servo","targets":{"1":2047,...}}   continuous mode for 30 Hz control: goals move towards the latest
 //                                               targets by at most 45 steps per 20 ms tick; holds after 500 ms silence
-//   {"cmd":"clear"}                             clear a latched servo-mode blockage fault
+//   {"cmd":"clear"}                             clear a latched blockage fault (move or servo mode)
 //   {"cmd":"stop"}                              hold where the arm is now
 //
 // Safety, always on:
@@ -19,7 +19,9 @@
 //   * while moving, a joint whose goal leads its position by > 80 steps (7 deg) for 3 ticks, or whose load
 //     exceeds 600 (60 %), aborts the move: every joint holds where it is (torque stays on so nothing drops);
 //   * a client that disconnects while its move runs stops the move;
-//   * torque limit during moves is 60 %.
+//   * torque limit during moves is 60 % (gripper 45 %);
+//   * the gripper never aborts: its goal stays within 60 steps of where the jaws are, so closing on an object
+//     keeps a bounded squeeze and the move or servo stream carries on.
 // The PC checks the path against the desk in MuJoCo before sending a move (skillarm path-check).
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -49,6 +51,9 @@ constexpr int N = 6;
 constexpr int kTickMs = 20;           // 50 Hz control / sampling
 constexpr int kLagSteps = 80, kLagTicks = 3, kLoadAbort = 600;
 constexpr uint16_t kTorqueLimit = 600;
+constexpr int kGripper = 5;                 // joint index of the gripper (servo id 6)
+constexpr int kGripLead = 60;               // max goal lead of the gripper over its position (~5 deg)
+constexpr uint16_t kGripTorqueLimit = 450;  // 45 %: holds a can without crushing it
 constexpr int kServoStep = 45;          // max goal change per 20 ms tick (~4 deg)
 constexpr int kServoTimeoutMs = 500;     // no servo command for this long -> hold
 
@@ -144,7 +149,7 @@ class Server {
       if (on) {
         // goal := present first, so enabling torque never jumps to a stale goal
         if (j.pos >= 0) bus_.write_u16(j.id, GOAL, uint16_t(std::clamp(j.pos, 0, 4095)));
-        bus_.write_u16(j.id, TORQUE_LIMIT, kTorqueLimit);
+        bus_.write_u16(j.id, TORQUE_LIMIT, jn - 1 == kGripper ? kGripTorqueLimit : kTorqueLimit);
         bus_.write(j.id, ACC, {0});
         bus_.write_u16(j.id, GOAL_SPEED, 0);
       }
@@ -229,7 +234,12 @@ class Server {
     std::vector<std::pair<uint8_t, std::vector<uint8_t>>> items;
     for (int k = 0; k < N; ++k) {
       if (!m_.on[k]) continue;
-      const int goal = int(std::lround(m_.from[k] + (m_.to[k] - m_.from[k]) * a));
+      int goal = int(std::lround(m_.from[k] + (m_.to[k] - m_.from[k]) * a));
+      if (k == kGripper) {  // jaws on an object: keep squeezing a bounded amount instead of aborting
+        goal = grip_goal(goal);
+        items.push_back({j_[k].id, {uint8_t(goal), uint8_t(goal >> 8)}});
+        continue;
+      }
       items.push_back({j_[k].id, {uint8_t(goal), uint8_t(goal >> 8)}});
       const int lead = std::abs(goal - j_[k].pos);
       m_.lag[k] = lead > kLagSteps ? m_.lag[k] + 1 : 0;
@@ -259,17 +269,31 @@ class Server {
     for (int k = 0; k < N; ++k) {
       if (!m_.on[k]) continue;
       m_.goal[k] += std::clamp(m_.target[k] - m_.goal[k], -kServoStep, kServoStep);
+      if (k == kGripper) {  // jaws on an object: keep squeezing a bounded amount instead of aborting
+        m_.goal[k] = grip_goal(m_.goal[k]);
+        items.push_back({j_[k].id, {uint8_t(m_.goal[k]), uint8_t(m_.goal[k] >> 8)}});
+        continue;
+      }
       const int goal = m_.goal[k];
       items.push_back({j_[k].id, {uint8_t(goal), uint8_t(goal >> 8)}});
       m_.lag[k] = std::abs(goal - j_[k].pos) > kLagSteps ? m_.lag[k] + 1 : 0;
       if (m_.lag[k] >= kLagTicks || std::abs(j_[k].load) > kLoadAbort) {
         char buf[160];
         std::snprintf(buf, sizeof buf, "joint %d blocked: goal %d, at %d, load %d", k + 1, goal, j_[k].pos, j_[k].load);
+        fault_ = buf;  // latched: servo commands are refused until "clear"
         stop(buf);
         return;
       }
     }
     bus_.sync_write(GOAL, items);
+  }
+
+  // Gripper goal limited to kGripLead steps beyond where the jaws are: closing on an object then presses with
+  // the force of that lead (under the gripper's own torque limit) rather than winding the goal up to the target.
+  int grip_goal(int goal) const {
+    const int p = j_[kGripper].pos;
+    if (p < 0) return goal;
+    return std::clamp(goal, p - kGripLead, p + kGripLead);
   }
 
   void client_gone(int fd) {

@@ -19,6 +19,7 @@
 #include "env/sim_pick_cube.hpp"
 #include "perceive/depth_shift.hpp"
 #include "core/calibration.hpp"
+#include "kin/kinematics.hpp"
 #include "real/arm_client.hpp"
 #include "real/camera_client.hpp"
 #include "real/real_so101.hpp"
@@ -614,6 +615,148 @@ int cmd_real_observe(const std::vector<std::string>& a) {
       stbi_write_png((out + "/real_depth.png").c_str(), c.rgb.width, c.rgb.height, 1, prev.data(), c.rgb.width);
     }
   }
+#ifdef SKILLARM_GPU
+  // --segment "<text>": the object in base-frame coordinates, as localize_object would see it
+  std::string text;
+  for (size_t i = 0; i + 1 < a.size(); ++i)
+    if (a[i] == "--segment") text = a[i + 1];
+  if (!text.empty()) {
+    const auto& c = o.cameras[0];
+    Sam3Options so;
+    so.dir = root + "/models/onnx/sam3";
+    so.variant = "_fp16";
+    Sam3Segmenter seg(so);
+    const auto r = seg.segment_text(c, text);
+    if (!r.ok || r.items.empty()) { std::printf("\"%s\": not found\n", text.c_str()); return 1; }
+    const auto& m = r.items[0];
+    const Backproject bp(c);
+    std::vector<std::array<double, 3>> pts;
+    std::vector<double> ds;
+    for (size_t i = 0; i < m.mask.size(); ++i)
+      if (m.mask[i] && c.depth_m[i] > 0) {
+        pts.push_back(bp.world(double(i % size_t(c.rgb.width)), double(i / size_t(c.rgb.width)), c.depth_m[i]));
+        ds.push_back(c.depth_m[i]);
+      }
+    if (pts.size() < 20) { std::printf("\"%s\": mask has no depth (%zu px)\n", text.c_str(), pts.size()); return 1; }
+    std::sort(ds.begin(), ds.end());
+    auto q = [&](int k, double f) {
+      std::vector<double> v;
+      for (const auto& p : pts) v.push_back(p[size_t(k)]);
+      std::sort(v.begin(), v.end());
+      return v[size_t(f * double(v.size() - 1))];
+    };
+    const double dmed = ds[ds.size() / 2];
+    std::printf("\"%s\" score %.3f, box [%d %d %d %d] (%d px wide), depth median %.3f m\n", text.c_str(), m.score,
+                m.box_xyxy[0], m.box_xyxy[1], m.box_xyxy[2], m.box_xyxy[3], m.box_xyxy[2] - m.box_xyxy[0], dmed);
+    std::printf("  width from the box at that depth: %.1f mm\n",
+                1000.0 * (m.box_xyxy[2] - m.box_xyxy[0]) * dmed / c.intrinsics[0]);
+    std::printf("  base frame: x %.3f..%.3f  y %.3f..%.3f  z %.3f..%.3f m (5-95 %%), centre (%.3f %.3f %.3f)\n", q(0, .05),
+                q(0, .95), q(1, .05), q(1, .95), q(2, .05), q(2, .95), q(0, .5), q(1, .5), q(2, .5));
+  }
+#endif
+  return 0;
+}
+
+// skillarm cam-aim [j:pos ...]
+//   Where the wrist camera would look with the real arm's current servo positions, optionally overridden
+//   (j = servo id 1..6). Prints the camera height, its pitch (negative = looking down) and where the image
+//   centre ray meets the desk. Reads only.
+int cmd_cam_aim(const std::vector<std::string>& a) {
+  std::string addr = std::getenv("SKILLARM_ARM") ? std::getenv("SKILLARM_ARM") : "100.115.242.117:7755";
+  const auto colon = addr.rfind(':');
+  const std::string root = SKILLARM_ROOT;
+  ArmClient arm(addr.substr(0, colon), std::stoi(addr.substr(colon + 1)));
+  const auto cal = Calibration::load(root + "/config/so101_calibration.json");
+  auto pos = arm.call({{"cmd", "state"}}).at("pos").get<std::vector<int>>();
+  for (const auto& s : a) {
+    const auto c = s.find(':');
+    if (c == std::string::npos) continue;
+    const int j = std::stoi(s.substr(0, c));
+    if (j >= 1 && j <= kJoints) pos[size_t(j - 1)] = std::stoi(s.substr(c + 1));
+  }
+  char err[512] = {};
+  mjModel* m = mj_loadXML((root + "/models/so101/real_desk.xml").c_str(), nullptr, err, sizeof err);
+  if (!m) { std::printf("model: %s\n", err); return 1; }
+  mjData* d = mj_makeData(m);
+  for (int j = 0; j < kJoints; ++j)
+    d->qpos[m->jnt_qposadr[mj_name2id(m, mjOBJ_JOINT, kJointNames[j])]] = cal.to_rad(j, pos[size_t(j)]);
+  mj_forward(m, d);
+  const int cam = mj_name2id(m, mjOBJ_CAMERA, "wrist");
+  const mjtNum* R = d->cam_xmat + 9 * cam;  // MuJoCo camera looks along -z
+  const double f[3] = {-R[2], -R[5], -R[8]}, p[3] = {d->cam_xpos[3 * cam], d->cam_xpos[3 * cam + 1], d->cam_xpos[3 * cam + 2]};
+  const double pitch = std::asin(std::clamp(f[2], -1.0, 1.0)) * 180 / 3.14159265358979;
+  std::printf("servo pos %d %d %d %d %d %d\n", pos[0], pos[1], pos[2], pos[3], pos[4], pos[5]);
+  std::printf("camera at (%.3f %.3f %.3f) m, pitch %+.1f deg", p[0], p[1], p[2], pitch);
+  if (f[2] < -1e-3) {
+    const double t = -p[2] / f[2];
+    std::printf(", image centre hits the desk %.3f m away at (%.3f %.3f)", t, p[0] + t * f[0], p[1] + t * f[1]);
+  }
+  std::printf("\n");
+  mj_deleteData(d);
+  mj_deleteModel(m);
+  return 0;
+}
+
+// skillarm ik-probe x y z [x y z ...]
+//   For the real arm's current joint angles: the tool pose now, and whether each target position is reachable
+//   (a) keeping the current tool orientation, (b) gripper pointing straight down, (c) any orientation. Reads only.
+int cmd_ik_probe(const std::vector<std::string>& a) {
+  std::string addr = std::getenv("SKILLARM_ARM") ? std::getenv("SKILLARM_ARM") : "100.115.242.117:7755";
+  const auto colon = addr.rfind(':');
+  const std::string root = SKILLARM_ROOT;
+  ArmClient arm(addr.substr(0, colon), std::stoi(addr.substr(colon + 1)));
+  const auto cal = Calibration::load(root + "/config/so101_calibration.json");
+  const auto pos = arm.call({{"cmd", "state"}}).at("pos").get<std::vector<int>>();
+  char err[512] = {};
+  mjModel* m = mj_loadXML((root + "/models/so101/real_desk.xml").c_str(), nullptr, err, sizeof err);
+  if (!m) { std::printf("model: %s\n", err); return 1; }
+  std::vector<double> q(kArmDof);
+  for (int j = 0; j < kArmDof; ++j) q[size_t(j)] = cal.to_rad(j, pos[size_t(j)]);
+  Kinematics kin(m);
+  const Pose now = kin.fk(q);
+  std::printf("tool now (%.3f %.3f %.3f) quat (%.3f %.3f %.3f %.3f)\n", now.position[0], now.position[1], now.position[2],
+              now.quaternion_wxyz[0], now.quaternion_wxyz[1], now.quaternion_wxyz[2], now.quaternion_wxyz[3]);
+  // straight down = the home orientation of the model (gripper pointing at the desk)
+  std::vector<double> home = {0, 0, 0, 1.5707963267948966, 0};
+  Pose down = kin.fk(home);
+  if (down.position[2] > kin.fk({0, 0, 0, -1.5707963267948966, 0}).position[2]) down = kin.fk({0, 0, 0, -1.5707963267948966, 0});
+  for (size_t i = 0; i + 2 < a.size(); i += 3) {
+    Pose t;
+    t.position = {std::stod(a[i]), std::stod(a[i + 1]), std::stod(a[i + 2])};
+    std::printf("target (%.3f %.3f %.3f):", t.position[0], t.position[1], t.position[2]);
+    const char* names[3] = {"same orientation", "pointing down", "any orientation"};
+    for (int k = 0; k < 3; ++k) {
+      t.quaternion_wxyz = k == 0 ? now.quaternion_wxyz : k == 1 ? down.quaternion_wxyz : Quat{0, 0, 0, 0};
+      const auto r = kin.ik(t, q);
+      std::printf("  %s %s", names[k], r.ok ? "ok" : "no");
+      if (!r.ok) std::printf(" (%.0f mm)", 1000 * r.position_error_m);
+    }
+    std::printf("\n");
+  }
+  mj_deleteModel(m);
+  return 0;
+}
+
+// skillarm jaw-open: gap between the fingertip pads (fixed_jaw_pad, moving_jaw_pad) over the gripper range,
+// from the task model's collision geometry.
+int cmd_jaw_open() {
+  char err[512] = {};
+  mjModel* m = mj_loadXML((std::string(SKILLARM_ROOT) + "/models/so101/real_desk.xml").c_str(), nullptr, err, sizeof err);
+  if (!m) { std::printf("model: %s\n", err); return 1; }
+  mjData* d = mj_makeData(m);
+  const int g1 = mj_name2id(m, mjOBJ_GEOM, "fixed_jaw_pad"), g2 = mj_name2id(m, mjOBJ_GEOM, "moving_jaw_pad");
+  const int jg = mj_name2id(m, mjOBJ_JOINT, "gripper");
+  const double lo = m->jnt_range[2 * jg], hi = m->jnt_range[2 * jg + 1];
+  for (int k = 0; k <= 10; ++k) {
+    const double q = lo + (hi - lo) * k / 10.0;
+    d->qpos[m->jnt_qposadr[jg]] = q;
+    mj_kinematics(m, d);
+    mjtNum fromto[6];
+    const double gap = mj_geomDistance(m, d, g1, g2, 1.0, fromto);
+    std::printf("gripper %+.3f rad (%3.0f %% open): pad gap %.1f mm\n", q, 100.0 * k / 10, 1000 * gap);
+  }
+  mj_deleteData(d);
+  mj_deleteModel(m);
   return 0;
 }
 

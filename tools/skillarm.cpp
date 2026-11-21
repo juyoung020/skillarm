@@ -6,7 +6,7 @@
 //                                                                    at a time; the servo server stops on contact
 //   skillarm arm stream [seconds]
 //   skillarm arm clear                                              clear a latched servo-mode blockage fault
-//   skillarm run program.cpp [--task pick_cube] [--seeds ..] [--real] compile + run an agent program per seed
+//   skillarm run program.cpp [--task pick_cube|pick_can] [--seeds ..] [--real] compile + run an agent program per seed
 //   skillarm init-run | progress | skill-sha | check-skill-report | dispatch | lint-skills | validate | watchdog |
 //            trace-stats | audit-seeding | score | evo-eval | evo-analyze | evo-compare | evo-progress
 //                                                                    skill helper tools (docs/03_skill_scripts_spec.md)
@@ -155,7 +155,7 @@ int ik_test(int n) {
   return 0;
 }
 
-// skillarm run program.cpp [--task pick_cube] [--seeds 0,1,2] [--out runs/name] [--real]
+// skillarm run program.cpp [--task pick_cube|pick_can] [--seeds 0,1,2] [--out runs/name] [--real]
 int run_cmd(const char* self, const std::vector<std::string>& a) {
   namespace fs = std::filesystem;
   const fs::path src = a[0];
@@ -178,7 +178,7 @@ int run_cmd(const char* self, const std::vector<std::string>& a) {
       return 1;
     }
     _putenv_s("SKILLARM_REAL", "1");
-    if (task == "pick_cube") task = "real_pick_cube";
+    if (task == "pick_cube" || task == "pick_can") task = "real_" + task;
   }
   const auto why = check_program_source(src);
   if (!why.empty()) { std::printf("program rejected: %s\n", why.c_str()); return 1; }
@@ -282,6 +282,9 @@ int main(int argc, char** argv) {
     if (cmd == "cam") return cmd_cam(rest);
     if (cmd == "wrist-check") return cmd_wrist_check(rest);
     if (cmd == "real-observe") return cmd_real_observe(rest);
+    if (cmd == "cam-aim") return cmd_cam_aim(rest);
+    if (cmd == "ik-probe") return cmd_ik_probe(rest);
+    if (cmd == "jaw-open") return cmd_jaw_open();
     if (cmd == "tokenize" && argc >= 3) {  // SAM3 text prompt -> CLIP token ids
       ClipTokenizer tok(std::string(SKILLARM_ROOT) + "/models/onnx/sam3/tokenizer.json");
       const auto e = tok.encode(argv[2]);
