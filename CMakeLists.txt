@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(MSVC)
   add_compile_options(/W4 /permissive- /utf-8 /O2)
+  add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX)
 endif()
 
 # MuJoCo 4.0.1 prebuilt (third_party/mujoco, unpacked release zip)
@@ -21,11 +22,20 @@ add_library(skillarm_core
 target_include_directories(skillarm_core PUBLIC include src)
 
 add_library(skillarm_sim
-  src/sim/so101_model.cpp)
+  src/sim/so101_model.cpp
+  src/sim/path_check.cpp)
 target_link_libraries(skillarm_sim PUBLIC skillarm_core mujoco)
+target_compile_definitions(skillarm_sim PRIVATE SKILLARM_ROOT="${CMAKE_SOURCE_DIR}")
+
+add_library(skillarm_kin src/kin/kinematics.cpp)
+target_link_libraries(skillarm_kin PUBLIC skillarm_core mujoco)
+
+add_library(skillarm_real src/real/arm_client.cpp)
+target_include_directories(skillarm_real PUBLIC include src third_party)
+target_link_libraries(skillarm_real PUBLIC ws2_32)
 
 add_executable(skillarm tools/skillarm.cpp)
-target_link_libraries(skillarm PRIVATE skillarm_sim)
+target_link_libraries(skillarm PRIVATE skillarm_sim skillarm_kin skillarm_real)
 target_compile_definitions(skillarm PRIVATE SKILLARM_ROOT="${CMAKE_SOURCE_DIR}")
 add_custom_command(TARGET skillarm POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different ${MUJOCO_DIR}/bin/mujoco.dll $<TARGET_FILE_DIR:skillarm>)
