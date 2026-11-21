@@ -5,8 +5,10 @@ C++/CUDA, native Windows, SO-101.
 
 [한국어 ↓](#한국어)
 
-> **Status: design phase (2026-11).** Nothing runs yet. This README states the plan; it will be replaced by
-> real results as each step lands.
+> **Status (2026-11-21): M0 done** — SO-101 loads in MuJoCo 4.0.1 from C++, and `skillarm path-check` simulates a
+> joint-by-joint move with the wrist camera mount and refuses paths that come within 10 mm of the desk
+> (same verdicts and millimetres as the Python reference on 5 recorded moves). Next: M1 servo server on the Pi.
+> Milestones: [`docs/02_design.md`](docs/02_design.md).
 
 ## Idea
 
@@ -55,7 +57,9 @@ Not affiliated with NVIDIA.
 **코딩 에이전트가 약 16만 원짜리 로봇팔에게 새 기술을 가르치고, 배운 것을 md 파일로 적어 둡니다.**
 C++/CUDA, 윈도우 네이티브, SO-101.
 
-> **상태: 설계 단계 (2026-11).** 아직 동작하는 것은 없습니다. 단계마다 실제 결과로 바꿔 갑니다.
+> **상태 (2026-11-21): M0 완료** — C++에서 MuJoCo 4.0.1로 SO-101을 불러, 손목 카메라 고정대까지 넣어 관절 이동 경로를
+> 시뮬레이션하고 책상과 10 mm 안으로 가까워지는 경로를 거부합니다(기록해 둔 이동 5개에서 파이썬 참고본과 판정·mm 값 일치).
+> 다음: M1 파이 서보 서버. 단계 표: [`docs/02_design.md`](docs/02_design.md).
 
 - NVIDIA [ASPIRE](https://github.com/NVlabs/ASPIRE)는 로봇 "학습"을 가중치 대신 **스킬 md를 다듬는 일**로 바꿨습니다.
   에이전트가 인식·계획·제어 API로 프로그램을 짜고, 실행 기록을 보고 실패를 고치고, 검증된 수정을 스킬로 쌓습니다.

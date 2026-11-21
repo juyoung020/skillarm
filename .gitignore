@@ -1,8 +1,9 @@
-build/
-out/
 *.engine
 *.onnx
 .vs/
 CMakeUserPresets.json
-runs/
+build/
+out/
 ref/
+runs/
+third_party/mujoco/
