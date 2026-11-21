@@ -1,0 +1,11 @@
+skillarm
+Copyright 2026 juyoung020
+
+This project is an independent C++/CUDA re-implementation inspired by, and
+following the design of, NVIDIA ASPIRE ("ASPIRE: Agentic /Skills Discovery for
+Robotics", https://github.com/NVlabs/ASPIRE), which is licensed under the
+Apache License, Version 2.0. Copyright (c) NVIDIA CORPORATION & AFFILIATES.
+Any files adapted from ASPIRE keep their original notices and say so at the top.
+
+The SO-101 robot model (MJCF/STL) comes from TheRobotStudio/SO-ARM100
+(https://github.com/TheRobotStudio/SO-ARM100), Apache License 2.0.

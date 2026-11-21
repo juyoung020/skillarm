@@ -1,0 +1,7 @@
+build/
+out/
+*.engine
+*.onnx
+.vs/
+CMakeUserPresets.json
+runs/
