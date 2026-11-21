@@ -3,9 +3,9 @@ name: localize
 description: Object localization via text segmentation — prompting strategies, multi-prompt fallback pattern, candidate disambiguation, and per-object prompt registry, as C++ helpers over the skillarm API. Grows through experiment.
 ---
 <!-- Adapted from NVIDIA ASPIRE .claude/skills/iterative-debugging/skills/localize.md (Apache-2.0); changes:
-snippets rewritten in C++ (SegmentationSet::items, box_xyxy as std::array<int,4>), camera names left as
-placeholders (the sim publishes none yet), perception status note added, SAM3 HTTP service → in-process
-SAM3-TensorRT provider, media/overlays reference marked as not yet recorded. -->
+snippets rewritten in C++ (SegmentationSet::items, box_xyxy as std::array<int,4>), camera names "scene" /
+"wrist", perception status note added, SAM3 HTTP service → in-process SAM3-TensorRT provider. -->
+
 
 # Localize — Segmentation Prompting & Object Localization
 
@@ -16,11 +16,11 @@ SAM3-TensorRT provider, media/overlays reference marked as not yet recorded. -->
 > Programs may include only `skillarm/api.hpp` and the allowed standard headers — all helpers
 > below are plain C++ over public contracts.
 
-> **Status (2026-11-22):** the segmentation provider (SAM3 via TensorRT, in-process) and the
-> real camera's depth (MoGe-2 monocular metric depth) are written in `src/perceive/` but not connected to runs yet. Today
-> `segment_text`, `segment_points` and `localize_object` return `ok == false` with
-> `error.code == "PROVIDER_UNAVAILABLE"`, and the simulation publishes no cameras. Nothing in
-> this file has been run yet; every entry below is ASPIRE's pattern, ported.
+> **Status (2026-11-22):** `segment_text` is SAM3 on TensorRT (in-process, text prompts only;
+> `segment_points` returns `PROVIDER_UNAVAILABLE`). Cameras: `"scene"` (fixed, simulation only)
+> and `"wrist"` (on the gripper, also the real arm's camera), each with metric depth — rendered in
+> simulation, MoGe-2 on the real arm. The registry below starts empty; every entry is ASPIRE's
+> pattern, ported, until a run here confirms it.
 
 ---
 
@@ -42,7 +42,7 @@ LocalizationResult locate(Api& api, const std::vector<std::string>& queries, con
 }
 
 // in SKILLARM_PROGRAM(api):
-const auto bottle = locate(api, {"<specific prompt>", "<fallback prompt>"}, "<camera>");
+const auto bottle = locate(api, {"<specific prompt>", "<fallback prompt>"}, "scene");
 if (!bottle.ok) { api.report("failed_at", "object not found: " + bottle.error.code); return; }
 const Vec3d center = bottle.geometry.pose.position;   // box centre from estimate_geometry
 ```
@@ -114,8 +114,9 @@ reuse a stale center.
 - `score < 0.5` → low confidence — try an alternative prompt before accepting
 - `point_cloud.points.size() < 20` → mask too small, object occluded, or no depth under the mask
   (`localize_object` itself fails `NOT_FOUND` below 10 points) — try a different prompt or camera
-- Mask overlays (`media/overlays/` in ASPIRE) are not recorded yet; until they are, verify a mask
-  through its `box_xyxy` and the projected geometry
+- Mask overlays: `media/overlays/sam3-*.png` shows the top 5 candidates of each call tinted and
+  boxed (colours in candidate order: red, green, blue, orange, purple); the `.json` beside it has
+  their labels, scores, boxes and mask sizes
 
 ---
 

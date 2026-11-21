@@ -79,9 +79,15 @@ ApiImpl::ApiImpl(EnvironmentAdapter& env, Recorder& rec, Segmenter* seg)
   cmd_arm_ = st.joint_positions;
   cmd_grip_ = st.gripper_position;
   down_ = kin_->fk(env_.home()).quaternion_wxyz;
+  keyframe_("reset");
 }
 
 ApiImpl::~ApiImpl() { mj_deleteData(check_data_); }
+
+void ApiImpl::keyframe_(const std::string& label) {
+  last_obs_ = env_.observe();
+  rec_.keyframe(label, steps_, last_obs_.cameras);
+}
 
 bool ApiImpl::tick_(const std::vector<double>& arm, double grip) {
   if (terminated_ || truncated_) return false;
@@ -140,7 +146,10 @@ SegmentationSet ApiImpl::segment_text(const std::string& camera_name, const std:
   last_obs_ = env_.observe();
   if (!seg_) r.error = {"PROVIDER_UNAVAILABLE", "no segmentation provider is loaded", false};
   else if (!camera_(camera_name, cam)) r.error = {"NOT_FOUND", "camera '" + camera_name + "' not published", false};
-  else r = seg_->segment_text(cam, text);
+  else {
+    r = seg_->segment_text(cam, text);
+    rec_.overlay(r, cam);
+  }
   json items = json::array();
   for (const auto& s : r.items) items.push_back({{"label", s.label}, {"score", s.score}, {"box_xyxy", s.box_xyxy}});
   rec_.span_end(sp, r.ok, {{"camera_name", camera_name}, {"text", text}}, {{"ok", r.ok}, {"items", items}}, je(r.error));
@@ -417,6 +426,7 @@ ExecutionResult ApiImpl::exec_(const Trajectory& t) {
 }
 
 ExecutionResult ApiImpl::execute_trajectory(const Trajectory& t) {
+  const MotionFrames frames(*this, "execute_trajectory");  // ASPIRE: keyframes before and after every motion tool
   const int sp = rec_.span_start("execute_trajectory", "api");
   auto r = exec_(t);
   rec_.span_end(sp, r.ok, {{"waypoints", t.joint_positions.size()}}, jx(r), je(r.error));
@@ -443,6 +453,7 @@ ExecutionResult ApiImpl::gripper_(double pos, bool contact_aware) {
 }
 
 ExecutionResult ApiImpl::set_gripper(double position) {
+  const MotionFrames frames(*this, "set_gripper");  // ASPIRE: keyframes before and after every motion tool
   const int sp = rec_.span_start("set_gripper", "api");
   auto r = gripper_(position, false);
   rec_.span_end(sp, r.ok, {{"position", position}}, jx(r), je(r.error));
@@ -491,6 +502,7 @@ const GraspCandidate* ApiImpl::select_grasp(const GraspSet& grasps, const std::s
 }
 
 ExecutionResult ApiImpl::move_to_joints(const std::vector<double>& target, double tolerance, int max_steps) {
+  const MotionFrames frames(*this, "move_to_joints");  // ASPIRE: keyframes before and after every motion tool
   const int sp = rec_.span_start("move_to_joints", "api");
   ExecutionResult r;
   auto plan = plan_joints_(target, {});
@@ -510,6 +522,7 @@ ExecutionResult ApiImpl::move_to_joints(const std::vector<double>& target, doubl
 }
 
 ExecutionResult ApiImpl::move_to_pose(const Pose& target, double tolerance, int max_steps, const MotionStrategy& s) {
+  const MotionFrames frames(*this, "move_to_pose");  // ASPIRE: keyframes before and after every motion tool
   const int sp = rec_.span_start("move_to_pose", "api");
   ExecutionResult r;
   const auto ik = kin_->ik(target, cmd_arm_);
@@ -538,6 +551,7 @@ ExecutionResult ApiImpl::move_to_pose(const Pose& target, double tolerance, int 
 }
 
 ExecutionResult ApiImpl::open_gripper() {
+  const MotionFrames frames(*this, "open_gripper");  // ASPIRE: keyframes before and after every motion tool
   const int sp = rec_.span_start("open_gripper", "api");
   auto r = gripper_(1.0, false);
   rec_.span_end(sp, r.ok, json::object(), jx(r), je(r.error));
@@ -545,6 +559,7 @@ ExecutionResult ApiImpl::open_gripper() {
 }
 
 ExecutionResult ApiImpl::close_gripper() {
+  const MotionFrames frames(*this, "close_gripper");  // ASPIRE: keyframes before and after every motion tool
   const int sp = rec_.span_start("close_gripper", "api");
   auto r = gripper_(0.0, true);
   rec_.span_end(sp, r.ok, json::object(), {{"ok", r.ok}, {"gripper_position", env_.robot_state().gripper_position}}, je(r.error));
@@ -552,6 +567,7 @@ ExecutionResult ApiImpl::close_gripper() {
 }
 
 ExecutionResult ApiImpl::go_home() {
+  const MotionFrames frames(*this, "go_home");  // ASPIRE: keyframes before and after every motion tool
   const int sp = rec_.span_start("go_home", "api");
   ExecutionResult r;
   for (int attempt = 0; attempt < 4; ++attempt) {

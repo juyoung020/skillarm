@@ -17,10 +17,10 @@ section "SO-101 Jaw Geometry and Reach"; pre-grasp/lift heights changed to the v
 > Programs may include only `skillarm/api.hpp` and the allowed standard headers — all helpers
 > below are plain C++ over public contracts, defined above `SKILLARM_PROGRAM`.
 
-> **Status (2026-11-22):** perception is not available yet — `localize_object` returns
-> `PROVIDER_UNAVAILABLE` until the SAM3-TensorRT segmenter and MoGe-2 depth (written in `src/perceive/`) are connected to runs. The skeleton below
-> compiles and the motion half of it is the sequence `sim-selftest` verified, but no agent program
-> has run it end to end.
+> **Status (2026-11-22):** the skeleton below compiles and its motion half is the sequence
+> `sim-selftest` verified. A camera-only pick in the same shape (`examples/pick_cube_vision.cpp`:
+> SAM3 mask → `generate_grasps` → top-down grasp) lifts the cube on 7/10 seeds; no agent-written
+> program has been graded against it yet.
 
 ---
 

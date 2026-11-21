@@ -83,8 +83,8 @@ report and `return;` rather than `throw`. Full contract: `include/skillarm/api.h
 checker and its banned substrings: `src/runner/runner.cpp`.
 
 **Harness and perception:** `"$SKILLARM" sim-selftest 3` must end with `selftest 3 / 3`.
-Perception (segmentation, depth) is not available yet — `localize_object`/`segment_text` return
-`PROVIDER_UNAVAILABLE`. If your scene snapshot shows that, mark the task BLOCKED and return.
+Perception: cameras `"scene"` and `"wrist"` with metric depth, `segment_text` = SAM3 (text
+prompts). If your scene snapshot shows `PROVIDER_UNAVAILABLE`, mark the task BLOCKED and return.
 
 ---
 
@@ -177,8 +177,7 @@ cp skills/iterative-debugging/scripts/scene_snapshot.cpp "$RUN_DIR/probe_scene.c
 The command prints `seed 51: ... -> <run_dir>`. Read from that run with the Read tool:
 - `source/program-result.json` — authoritative `task_language`, `cameras`, `perception_check`,
   home tool pose
-- `media/keyframes/` — RGB of the untouched scene from every camera (empty until the simulation
-  renders cameras)
+- `media/keyframes/000001-reset/` — RGB of the untouched scene from every camera
 
 To validate segmentation prompts, edit `PROBE_PROMPTS` in `$RUN_DIR/probe_scene.cpp`, re-run with
 `--out "$RUN_DIR/snapshot_<slug>"`, and read the probe results plus

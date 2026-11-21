@@ -21,15 +21,16 @@ disjoint scenes.
    program is compiled by `skillarm run` itself (MSVC, into `<out>/build/program.dll`).
 2. Check the physics path: `build/skillarm.exe sim-selftest 3` must end with `selftest 3 / 3`.
    This is a host-side ground-truth check, not an agent program.
-3. **Check perception before dispatching anything.** Segmentation (`segment_text`, SAM3 via
-   TensorRT, in-process) and depth for the real camera (a monocular metric depth model) are
-   written (`src/perceive/`, `skillarm sam3`, `skillarm depth`) but **not connected to runs yet**: `localize_object` and `segment_text` currently return
-   `PROVIDER_UNAVAILABLE`, and the simulation publishes no cameras. Any task whose program has to
-   find an object cannot be solved legitimately until that lands — the provenance rule forbids
-   the obvious workaround of hardcoding the object pose. Run the scene snapshot
+3. **Check perception before dispatching anything.** The simulation publishes two cameras,
+   `"scene"` (a fixed view of the work area) and `"wrist"` (the real arm's C270 pose), each with
+   RGB, metric depth, intrinsics and pose. Segmentation (`segment_text`, SAM3 on TensorRT,
+   in-process, loaded on a run's first call) needs the GPU, which is shared with another session
+   on this PC — get the user's go-ahead before a campaign. Run the scene snapshot
    ([skills/task-exploration.md](skills/task-exploration.md)) once and read `perception_check` in
-   `source/program-result.json`; if it reports `PROVIDER_UNAVAILABLE`, tell the user instead of
-   starting a campaign.
+   `source/program-result.json`: `ok` means a program can find objects; `PROVIDER_UNAVAILABLE`
+   (no GPU build, or the models are missing) means no task that must find an object can be solved
+   legitimately — the provenance rule forbids hardcoding the object pose — so tell the user instead
+   of starting a campaign.
 4. Read `include/skillarm/api.hpp` (the whole agent API), `src/runner/runner.cpp` (allowed headers
    and forbidden constructs), and [main-agent-prompt.md](main-agent-prompt.md). Run-directory
    layout is written by `src/record/recorder.cpp`.

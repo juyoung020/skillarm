@@ -13,7 +13,7 @@ Use this before rerunning a task.
    (`tasklist | findstr skillarm`).
 3. Regenerate `$RUN_ROOT/progress.md` with `build/skillarm.exe progress`.
 4. Verify the harness with `build/skillarm.exe sim-selftest 3`, and check that perception answers
-   (scene snapshot `perception_check`; `PROVIDER_UNAVAILABLE` means it is not connected to runs yet).
+   (scene snapshot `perception_check` is `ok`; `PROVIDER_UNAVAILABLE` means no GPU build or missing models).
 5. Keep the three seed bands configured in `campaign.json` separate: `dev_seeds` are debugged
    against (51–65 by default), `unseen_seeds` are measured once at the end of Stage 1 and never
    tuned against (66–80 by default), and the held-out partition is reserved for the coordinator's

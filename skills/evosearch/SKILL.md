@@ -19,9 +19,9 @@ seeds 51–65 and held-out seeds 1–50 never overlap.
 1. Build the harness once (`build.cmd` → `build/skillarm.exe`); agents never rebuild it.
 2. Check the physics path: `build/skillarm.exe sim-selftest 3` must end with `selftest 3 / 3`.
 3. Check perception: run the scene snapshot
-   (`skills/iterative-debugging/skills/task-exploration.md`) and read `perception_check`. It is
-   `PROVIDER_UNAVAILABLE` today (SAM3-TensorRT segmentation and monocular depth are planned, not
-   built); a search over candidates cannot fix that, so do not start one until it reads `ok`.
+   (`skills/iterative-debugging/skills/task-exploration.md`) and read `perception_check`. It must
+   read `ok` (SAM3 on TensorRT needs the GPU build and the models); a search over candidates
+   cannot fix `PROVIDER_UNAVAILABLE`, so do not start one until it reads `ok`.
 4. Confirm the Fix Loop experiment has produced `fix_code.cpp` (and a baseline held-out rate)
    for the target tasks when available.
 5. Read `include/skillarm/api.hpp`, `src/runner/runner.cpp` (program rules),

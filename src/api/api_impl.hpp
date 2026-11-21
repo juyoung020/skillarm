@@ -55,6 +55,13 @@ class ApiImpl final : public Api {
   ExecutionResult gripper_(double pos, bool contact_aware);
   bool tick_(const std::vector<double>& arm, double grip);  // one env step + record; false if episode ended
   bool camera_(const std::string& name, CameraObservation& out);
+  void keyframe_(const std::string& label);  // fresh observation -> media/keyframes
+  struct MotionFrames {  // keyframe "before-<tool>" now and "after-<tool>" when the tool returns
+    ApiImpl& api;
+    std::string tool;
+    MotionFrames(ApiImpl& a, std::string t) : api(a), tool(std::move(t)) { api.keyframe_("before-" + tool); }
+    ~MotionFrames() { api.keyframe_("after-" + tool); }
+  };
   std::string desk_check_(const Trajectory& t);              // "" if the path keeps clear of the desk
 
   EnvironmentAdapter& env_;

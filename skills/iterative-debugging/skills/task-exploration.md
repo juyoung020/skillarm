@@ -32,10 +32,12 @@ The command prints `seed <N>: <reason>, success=..., steps=... -> <run_dir>`. Re
   `home_tcp_*`, `perception_check`, and per prompt `probe_<i>_ok`, `probe_<i>_count`,
   `probe_<i>_top_score`, `probe_<i>_error`.
   - **`perception_check == "PROVIDER_UNAVAILABLE"` or `cameras == ""` means perception is not
-    available in this build** (the current state). No program can localize anything; stop and
-    report it rather than writing a program around it.
-- `media/keyframes/` — RGB of the untouched scene from every camera (empty until the simulation
-  renders cameras).
+    available in this build** (no GPU build, or missing models). No program can localize
+    anything; stop and report it rather than writing a program around it.
+- `media/keyframes/000001-reset/` — RGB of the untouched scene from every camera (`scene.png`,
+  `wrist.png`) and `scene-depth.npy`; later keyframes are `before-<tool>` / `after-<tool>`.
+- `media/overlays/sam3-*.png` — every `segment_text` call: up to 5 candidates tinted and boxed,
+  with their labels and scores in the matching `.json`.
 - To validate prompts, edit `PROBE_PROMPTS` in your copy after inspecting the keyframes, re-run
   with `--out "$TASK_DIR/debug/explore/<probe-slug>"`, and read the probe results in
   `source/program-result.json` plus every candidate's score and box in

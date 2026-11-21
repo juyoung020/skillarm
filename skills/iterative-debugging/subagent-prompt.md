@@ -147,14 +147,16 @@ This is a provenance rule, not only an API-name ban:
 
 `get_task_context().language` is the only reliable source for the actual goal.
 
-**Perception is not available yet.** `segment_text`/`segment_points` (SAM3 via TensorRT,
-in-process) and depth for the real camera (a monocular metric depth model) are planned; today
-they return `PROVIDER_UNAVAILABLE`, `localize_object` passes that error through, and the
-simulation publishes no cameras (`get_observation().cameras` is empty). If your Stage 0 probe
-shows this, stop and return `fix_code.cpp written: no` with the reason — do not work around it
-with hardcoded positions.
+**Perception.** The simulation publishes two cameras, `"scene"` (fixed view of the work area) and
+`"wrist"` (on the gripper, the pose of the real arm's C270), each 640x480 with metric depth,
+intrinsics and pose. `segment_text` is SAM3 (TensorRT, text prompts only); `segment_points`
+returns `PROVIDER_UNAVAILABLE` (the SAM3 export takes no point prompts). On the real arm only
+`"wrist"` exists and its depth is estimated (MoGe-2), so programs meant to transfer should not
+depend on `"scene"`. If your Stage 0 probe shows `segment_text` returning `PROVIDER_UNAVAILABLE`,
+stop and return `fix_code.cpp written: no` with the reason — do not work around it with hardcoded
+positions.
 
-Read camera names from `get_observation().cameras` once they exist; keep target poses and
+Read camera names from `get_observation().cameras`; keep target poses and
 geometry in `get_robot_state().base_frame` (`"robot_base"`). The arm is a single 5-joint arm
 (`shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll`) plus a gripper; there are no
 arm names to pass.
@@ -305,7 +307,8 @@ reading each failed seed's artifacts in this order (writer: `src/record/recorder
     outputs (`final_position_error_m`, `steps_executed`, `status`, grasp candidates, gripper
     position after close) and `{code, message}` of every API call
   - `episode/steps.jsonl` — one line per control tick: the robot state over the episode
-  - `media/keyframes/` — RGB before each motion call (empty until camera rendering lands)
+  - `media/keyframes/` — RGB of every camera at reset and before/after each motion call
+  - `media/overlays/` — SAM3 candidates of each `segment_text` call, tinted and boxed (+ `.json`)
 
 | Mode | Evidence | Typical fix |
 |---|---|---|

@@ -27,7 +27,7 @@ build/skillarm.exe sim-selftest 3        # must end with "selftest 3 / 3"
 
 Then run the scene snapshot once (`skills/iterative-debugging/skills/task-exploration.md`) and
 read `perception_check` in its `source/program-result.json`. It must read `ok` before dispatching.
-Today it reads `PROVIDER_UNAVAILABLE` (SAM3 segmentation and MoGe-2 depth are written in `src/perceive/` but not connected to runs yet): tell the
+If it reads `PROVIDER_UNAVAILABLE` (a build without the GPU, or missing models): tell the
 user instead of dispatching — eight candidates that cannot see the object are eight copies of the
 same failure.
 

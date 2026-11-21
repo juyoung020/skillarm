@@ -42,7 +42,7 @@ child processes), `cpp_scan.*` (the C++ token scanner of §3.2 and §5), `campai
 Benchmark-specific parts dropped everywhere: LIBERO/Robosuite/BEHAVIOR environment variables
 (`MUJOCO_GL`, `EGL_*`, `MUJOCO_EGL_DEVICE_ID`, `CUDA_VISIBLE_DEVICES`, `LIBERO_CONFIG_PATH`,
 `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD`, `OMNIGIBSON_*`), `--init-mode` (`seeded`/`saved`), `--gpu`,
-camera width/height flags (no cameras yet; see §0.5), `--cap-harness` (the subcommand runs
+camera width/height flags (fixed 640×480; see §0.5), `--cap-harness` (the subcommand runs
 itself), Isaac log scraping (`kit_error_lines`, `device_assert`), the registry horizon lookup,
 `_task`-suite notes, suite name collisions, cumulative reward.
 
@@ -126,7 +126,8 @@ trace/events.jsonl   {"event":"span_start"|"span_end", span_id, parent_id, name,
                      ok, duration_s, [error{code,message,recoverable}]}
 trace/calls/call-<NNNNNN>-<slug(name)>/{input,output,error}.json   (slug: every non-alphanumeric
                      char → '-', so segment_text → segment-text)
-media/keyframes/     (empty until cameras render)
+media/keyframes/     (every camera at reset and before/after each motion call)
+media/overlays/      (SAM3 candidates of each segment_text call)
 logs/program.stdout, logs/program.stderr
 ```
 
@@ -146,7 +147,7 @@ simulated tasks only (`pick_cube`: 1500); `validate` and `evo-eval` therefore ru
 ### 0.5 Cameras
 
 Camera width/height are part of ASPIRE's run identity (`--camera-width 800 --camera-height 512`).
-The skillarm simulation publishes one fixed camera, `scene` (640×480), that no flag changes, so
+The skillarm simulation publishes two fixed-size cameras, `scene` and `wrist` (640×480 each), that no flag changes, so
 identities omit camera size. Making the size configurable means adding it to `run.json` `capture`
 and to the identity objects in §6 and §11, which deliberately changes every `run_id`.
 

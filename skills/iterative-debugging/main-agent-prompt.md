@@ -77,7 +77,7 @@ been verified. Coupling them would stall benchmark results behind library bookke
 
 A **slot** is one concurrent simulation job. MuJoCo runs on the CPU, so slots are bounded by CPU
 cores and memory, not by GPUs; the user assigns the slot count at kickoff (default 2). The GPU is
-used only by perception (once it exists) and is shared with another session on this PC — never
+used only by perception (SAM3 segmentation) and is shared with another session on this PC — never
 start GPU work without the user's go-ahead. You are the only allocator of the assigned slots.
 Keep an explicit ledger in your working notes, e.g.:
 
@@ -118,10 +118,12 @@ build/skillarm.exe sim-selftest 3          # must end with "selftest 3 / 3"
 ```
 
 Then run the scene snapshot once yourself ([skills/task-exploration.md](skills/task-exploration.md))
-and read `perception_check` in its `source/program-result.json`. If `segment_text` reports
-`PROVIDER_UNAVAILABLE` (the current state: SAM3-TensorRT segmentation and MoGe-2 depth are
-written in `src/perceive/` but not connected to runs until the GPU is free and the simulator renders cameras), stop and tell the user — subagents would otherwise spend their whole budget
-on a task no legitimate program can solve, and the failure reads like a program bug.
+and read `perception_check` in its `source/program-result.json` (`ok` when segmentation answers;
+`cameras` lists `scene,wrist`). If `segment_text` reports `PROVIDER_UNAVAILABLE` (a build without
+the GPU, or missing models under `models/onnx/`), stop and tell the user — subagents would
+otherwise spend their whole budget on a task no legitimate program can solve, and the failure
+reads like a program bug. Each run loads SAM3 on its first `segment_text` call (a few seconds of
+the run's wall time, none of its simulated time).
 
 Perception and planning run in-process; there are no service ports to check and nothing to
 start. The per-benchmark values of `$SKILLARM` and `$TASK` are in the Benchmark Profiles table of

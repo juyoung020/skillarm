@@ -2,7 +2,8 @@
 // so the iterative-debugging skill documents can point at the same files:
 //   run.json, outcome.json, manifest.json, source/program.cpp, source/program-result.json,
 //   episode/reset.json, episode/steps.jsonl, trace/events.jsonl, trace/calls/call-NNNNNN-<tool>/{input,output,error}.json,
-//   media/keyframes/<NNNNNN>-before-<tool>/<camera>.png, logs/program.stdout, logs/program.stderr
+//   media/keyframes/<NNNNNN>-<label>/{<camera>.png, <camera>-depth.npy (first keyframe only), metadata.json},
+//   media/overlays/sam3-<NNNNNN>-<camera>.{png,json}, logs/program.stdout, logs/program.stderr
 #pragma once
 #include <chrono>
 #include <filesystem>
@@ -10,6 +11,7 @@
 #include <string>
 
 #include "nlohmann/json.hpp"
+#include "skillarm/api.hpp"
 
 namespace skillarm {
 
@@ -28,6 +30,10 @@ class Recorder {
   void stderr_line(const std::string& s);
   void time_bucket(const std::string& name, double seconds);
   void result(const nlohmann::json& program_result);
+  // ASPIRE keyframe: every camera as PNG (depth as .npy on the first keyframe of the run) + metadata.json.
+  void keyframe(const std::string& label, int step_index, const std::vector<CameraObservation>& cameras);
+  // ASPIRE segmentation overlay: the top 5 candidates tinted and boxed on the camera image, + their json.
+  void overlay(const SegmentationSet& result, const CameraObservation& camera);
   // Writes outcome.json, finalizes run.json, then manifest.json (relative path, size, sha256 of every file).
   void finalize(nlohmann::json outcome);
 
@@ -37,7 +43,8 @@ class Recorder {
   std::ofstream events_, steps_, out_, err_;
   nlohmann::json run_;
   nlohmann::json buckets_ = nlohmann::json::object();
-  int next_span_ = 1, next_call_ = 1;
+  int next_span_ = 1, next_call_ = 1, keyframe_index_ = 0, overlay_index_ = 0;
+  bool depth_saved_ = false;
   std::chrono::steady_clock::time_point t0_;
   struct Open { std::string name, category; int parent; std::chrono::steady_clock::time_point t; int call; };
   std::vector<Open> open_;

@@ -32,10 +32,9 @@ Task names must match the harness: `skillarm run` refuses an unknown one with
 "$SKILLARM" sim-selftest 3      # must end with "selftest 3 / 3"
 ```
 Perception runs in-process (no services to start). Read `perception_check` from the scene
-snapshot (§3): `ok`, or `PROVIDER_UNAVAILABLE` while segmentation (SAM3-TensorRT) and depth
-(MoGe-2) are not connected to runs — the current state: the providers are written (`src/perceive/`) but
-wait for the GPU and for simulated camera rendering. With no perception, every candidate
-fails identically; do not iterate.
+snapshot (§3): `ok`, or `PROVIDER_UNAVAILABLE` when segmentation (SAM3-TensorRT) is not
+available (no GPU build, or missing models). With no perception, every candidate fails
+identically; do not iterate.
 
 ---
 
@@ -101,8 +100,7 @@ cp skills/iterative-debugging/scripts/scene_snapshot.cpp "$RUN_DIR/probe_scene.c
 **Step 2 — Read the recorded artifacts** (the command prints `seed 51: ... -> <run_dir>`):
 - `<run_dir>/source/program-result.json` — authoritative `task_language`, `cameras`,
   `perception_check`, home tool pose
-- `<run_dir>/media/keyframes/` — RGB from every camera (empty until the simulation renders
-  cameras)
+- `<run_dir>/media/keyframes/` — RGB from every camera at reset and before/after each motion call
 
 Look for: every raised edge or obstacle, which approach directions are blocked vs clear, object
 shapes and relative positions, and how far each object is from the arm base (reach).
@@ -231,8 +229,9 @@ api.report("key", 1.0);                                   // → source/program-
 | Placement target | segment target, project, use a high Z quantile as surface |
 
 **Camera names:** read them from `api.get_observation().cameras` (`.name`). The simulation
-publishes none yet; once it does, prefer the wide scene camera for initial localization and
-re-check after the arm moves out of its view.
+publishes `"scene"` (fixed, wide) and `"wrist"` (on the gripper; the only camera on the real
+arm). The scene camera suits initial localization in simulation; re-check after the arm moves
+out of its view.
 
 ---
 
@@ -325,7 +324,7 @@ runs/evosearch/<benchmark>/<task>/<run_id>/
 │   │           ├── trace/calls/         # per-call input/output/error JSON
 │   │           ├── episode/steps.jsonl  # one line per control tick
 │   │           ├── logs/program.stdout, program.stderr
-│   │           └── media/keyframes/     # empty until cameras render
+│   │           └── media/keyframes/     # every camera at reset and before/after each motion
 │   ├── candidate_B/
 │   │   └── ...
 │   └── iter_summary.json        # leaderboard across all candidates
@@ -542,12 +541,12 @@ Every recorded run keeps its own media:
 
 ```
 <run_dir>/media/
-    keyframes/<NNNNNN>-before-<tool>/<camera>.png   # RGB before each motion call
+    keyframes/<NNNNNN>-before-<tool>/<camera>.png   # RGB before (and after) each motion call
+    overlays/sam3-<NNNNNN>-<camera>.png             # SAM3 candidates of each segment_text call
 ```
 
-(Videos and mask overlays, which ASPIRE records, are not recorded by skillarm yet; and keyframes
-stay empty until the simulation renders cameras. Until then, `episode/steps.jsonl` and
-`trace/calls/` are the evidence.)
+(Per-camera videos, which ASPIRE also records, are not recorded by skillarm; `episode/steps.jsonl`
+has the robot state of every control tick.)
 
 If you are unsure about a failure case, read from the failed seed's run:
 - the first keyframe — initial scene, object positions, obstacles

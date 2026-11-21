@@ -1,9 +1,17 @@
 #include "record/recorder.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <random>
 #include <sstream>
+
+#pragma warning(push, 0)
+#include "stb/stb_image_write.h"
+#pragma warning(pop)
 
 namespace skillarm {
 namespace fs = std::filesystem;
@@ -18,10 +26,35 @@ std::string utc_stamp() {
   std::strftime(b, sizeof b, "%Y%m%dT%H%M%SZ", &g);
   return b;
 }
-std::string slug(const std::string& s) {
+// ASPIRE artifacts.py slug(): lower case, runs of other characters -> '-', trimmed, at most 96 characters
+std::string slug(const std::string& s, const char* keep = "") {
   std::string o;
-  for (char c : s) o += (std::isalnum(static_cast<unsigned char>(c)) ? c : '-');
-  return o;
+  bool dash = false;
+  for (char c : s) {
+    const char l = char(std::tolower(static_cast<unsigned char>(c)));
+    const bool ok = (l >= 'a' && l <= 'z') || (l >= '0' && l <= '9') || (l && std::strchr(keep, l));
+    if (ok) { o += l; dash = false; }
+    else if (!dash) { o += '-'; dash = true; }
+  }
+  const std::string strip = std::string("-") + keep;
+  const auto b = o.find_first_not_of(strip), e = o.find_last_not_of(strip);
+  o = b == std::string::npos ? "unnamed" : o.substr(b, e - b + 1);
+  return o.substr(0, 96);
+}
+// ASPIRE _component(): the same but keeps '_' and '.' (camera names in file names)
+std::string component(const std::string& s) { return slug(s, "_."); }
+
+// float32 C-order .npy (NumPy format 1.0), as np.save writes it
+void write_npy(const fs::path& p, const std::vector<float>& v, int h, int w) {
+  std::string hdr = "{'descr': '<f4', 'fortran_order': False, 'shape': (" + std::to_string(h) + ", " + std::to_string(w) + "), }";
+  while ((10 + hdr.size() + 1) % 64) hdr += ' ';
+  hdr += '\n';
+  std::ofstream f(p, std::ios::binary);
+  f.write("\x93NUMPY\x01\x00", 8);
+  const uint16_t n = uint16_t(hdr.size());
+  f.write(reinterpret_cast<const char*>(&n), 2);
+  f.write(hdr.data(), std::streamsize(hdr.size()));
+  f.write(reinterpret_cast<const char*>(v.data()), std::streamsize(v.size() * sizeof(float)));
 }
 std::string read_file(const fs::path& p) {
   std::ifstream f(p, std::ios::binary);
@@ -83,6 +116,7 @@ std::string sha256_hex(const std::string& data) {
 Recorder::Recorder(const fs::path& out_root, const std::string& benchmark, const std::string& task_id, int seed,
                    const fs::path& program_source)
     : t0_(std::chrono::steady_clock::now()) {
+  stbi_write_png_compression_level = 1;  // ASPIRE PNG_COMPRESS_LEVEL: ~4x faster than the default for ~10 % more bytes
   std::random_device rd;
   char hex[9];
   std::snprintf(hex, sizeof hex, "%08x", rd());
@@ -152,6 +186,74 @@ void Recorder::time_bucket(const std::string& name, double seconds) {
   buckets_[name] = buckets_.value(name, 0.0) + seconds;
 }
 void Recorder::result(const json& r) { write_json("source/program-result.json", r); }
+
+void Recorder::keyframe(const std::string& label, int step_index, const std::vector<CameraObservation>& cameras) {
+  if (cameras.empty()) return;
+  const auto t0 = std::chrono::steady_clock::now();
+  char nn[16];
+  std::snprintf(nn, sizeof nn, "%06d", ++keyframe_index_);
+  const fs::path rel = fs::path("media/keyframes") / (std::string(nn) + "-" + slug(label));
+  fs::create_directories(dir_ / rel);
+  json cams = json::object();
+  for (const auto& c : cameras) {
+    if (c.rgb.width <= 0) continue;
+    const std::string n = component(c.name);
+    stbi_write_png((dir_ / rel / (n + ".png")).string().c_str(), c.rgb.width, c.rgb.height, 3, c.rgb.rgb.data(),
+                   c.rgb.width * 3);
+    json rec = {{"rgb", n + ".png"}, {"frame", c.name}};
+    if (!depth_saved_ && c.depth_m.size() == size_t(c.rgb.width) * c.rgb.height) {
+      write_npy(dir_ / rel / (n + "-depth.npy"), c.depth_m, c.rgb.height, c.rgb.width);
+      rec["depth"] = n + "-depth.npy";
+      depth_saved_ = true;
+    }
+    cams[c.name] = rec;
+  }
+  write_json(rel / "metadata.json", {{"label", label}, {"step_index", step_index}, {"cameras", cams}});
+  time_bucket("keyframe", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+}
+
+void Recorder::overlay(const SegmentationSet& r, const CameraObservation& cam) {
+  if (!r.ok || r.items.empty()) return;
+  const auto& first = r.items.front();
+  const int w = cam.rgb.width, h = cam.rgb.height;
+  if (first.width != w || first.height != h) return;
+  const auto t0 = std::chrono::steady_clock::now();
+  static const uint8_t colors[5][3] = {{255, 64, 64}, {64, 255, 64}, {64, 128, 255}, {255, 192, 64}, {224, 64, 255}};
+  std::vector<uint8_t> img = cam.rgb.rgb;
+  json records = json::array();
+  for (size_t k = 0; k < r.items.size() && k < 5; ++k) {
+    const auto& s = r.items[k];
+    if (s.width != w || s.height != h || s.camera_name != first.camera_name) continue;
+    const uint8_t* col = colors[k];
+    int pixels = 0;
+    for (size_t i = 0; i < s.mask.size(); ++i)
+      if (s.mask[i]) {
+        ++pixels;
+        for (int c = 0; c < 3; ++c) img[3 * i + size_t(c)] = uint8_t(std::lround(0.68 * img[3 * i + size_t(c)] + 0.32 * col[c]));
+      }
+    const int x1 = std::clamp(s.box_xyxy[0], 0, w - 1), y1 = std::clamp(s.box_xyxy[1], 0, h - 1);
+    const int x2 = std::clamp(s.box_xyxy[2], 0, w - 1), y2 = std::clamp(s.box_xyxy[3], 0, h - 1);
+    auto put = [&](int x, int y) {
+      if (x < 0 || y < 0 || x >= w || y >= h) return;
+      for (int c = 0; c < 3; ++c) img[3 * (size_t(y) * w + x) + size_t(c)] = col[c];
+    };
+    for (int t = 0; t < 3; ++t) {  // 3 px outline, as ASPIRE draws it
+      for (int x = x1; x <= x2; ++x) { put(x, y1 + t); put(x, y2 - t); }
+      for (int y = y1; y <= y2; ++y) { put(x1 + t, y); put(x2 - t, y); }
+    }
+    records.push_back({{"index", k}, {"label", s.label}, {"score", s.score}, {"box_xyxy", {x1, y1, x2, y2}},
+                       {"mask_pixels", pixels}});
+  }
+  char nn[16];
+  std::snprintf(nn, sizeof nn, "%06d", ++overlay_index_);
+  const std::string stem = "sam3-" + std::string(nn) + "-" + component(first.camera_name);
+  fs::create_directories(dir_ / "media/overlays");
+  stbi_write_png((dir_ / "media/overlays" / (stem + ".png")).string().c_str(), w, h, 3, img.data(), w * 3);
+  write_json(fs::path("media/overlays") / (stem + ".json"),
+             {{"camera_name", first.camera_name}, {"camera_frame", first.camera_name}, {"image_shape", {h, w}},
+              {"candidates", records}});
+  time_bucket("overlay", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+}
 
 void Recorder::finalize(json outcome) {
   const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0_).count();
