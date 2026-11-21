@@ -16,7 +16,8 @@ class Segmenter {
   virtual SegmentationSet segment_points(const CameraObservation& cam, const std::vector<std::array<double, 2>>& pts) = 0;
 };
 
-// Monocular metric depth: fills cam.depth_m (metres, 0 = unknown) from cam.rgb and cam.intrinsics.
+// Monocular metric depth: fills cam.depth_m (metres, 0 = unknown) from cam.rgb and cam.intrinsics. With
+// intrinsics[0] <= 0 (uncalibrated camera) the focal length is estimated too and written into cam.intrinsics.
 class DepthEstimator {
  public:
   virtual ~DepthEstimator() = default;

@@ -38,6 +38,7 @@ class MogeDepth final : public DepthEstimator {
   std::unique_ptr<TrtEngine> net_;
   cudaStream_t stream_ = nullptr;
   uint8_t* d_rgb_ = nullptr;
+  std::string scale_name_;
   double last_ms_ = 0, shift_ = 0, scale_ = 1;
 };
 

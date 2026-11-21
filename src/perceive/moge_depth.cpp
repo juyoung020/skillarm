@@ -50,6 +50,9 @@ MogeDepth::MogeDepth(MogeOptions o) : o_(std::move(o)) {
     onnx_bake_int64_input(o_.onnx, baked, "num_tokens", {o_.num_tokens});
   net_ = std::make_unique<TrtEngine>(baked,
                                      std::map<std::string, std::vector<int64_t>>{{"image", {1, 3, o_.height, o_.width}}});
+  for (const auto& t : net_->tensors())  // vits export: "scale", vitb export: "metric_scale"
+    if (!t.input && t.name.find("scale") != std::string::npos) scale_name_ = t.name;
+  if (scale_name_.empty()) throw std::runtime_error(o_.onnx + ": no metric scale output");
   ck(cudaMalloc(reinterpret_cast<void**>(&d_rgb_), size_t(o_.width) * o_.height * 3), "cudaMalloc rgb");
 }
 
@@ -102,7 +105,7 @@ double MogeDepth::desk_scale(const CameraObservation& cam, const std::vector<flo
 
 bool MogeDepth::estimate(CameraObservation& cam) {
   const int w = cam.rgb.width, h = cam.rgb.height;
-  if (w != o_.width || h != o_.height || cam.rgb.rgb.size() != size_t(w) * h * 3 || cam.intrinsics[0] <= 0) return false;
+  if (w != o_.width || h != o_.height || cam.rgb.rgb.size() != size_t(w) * h * 3) return false;
   const auto t0 = std::chrono::steady_clock::now();
   ck(cudaMemcpyAsync(d_rgb_, cam.rgb.rgb.data(), cam.rgb.rgb.size(), cudaMemcpyHostToDevice, stream_), "upload");
   auto& in = net_->tensor("image");
@@ -111,10 +114,16 @@ bool MogeDepth::estimate(CameraObservation& cam) {
   net_->run(stream_);
   const auto points = download_float(net_->tensor("points"), stream_);  // [1, h, w, 3]
   const auto mask = download_float(net_->tensor("mask"), stream_);      // [1, h, w], sigmoid
-  scale_ = download_float(net_->tensor("scale"), stream_).at(0);
+  scale_ = download_float(net_->tensor(scale_name_), stream_).at(0);
   std::vector<uint8_t> valid(size_t(w) * h);
   for (size_t i = 0; i < valid.size(); ++i) valid[i] = mask[i] > 0.5f && std::isfinite(points[3 * i + 2]);
-  shift_ = recover_shift(points.data(), valid.data(), w, h, cam.intrinsics);
+  if (cam.intrinsics[0] > 0) {
+    shift_ = recover_shift(points.data(), valid.data(), w, h, cam.intrinsics);
+  } else {  // uncalibrated camera: focal from the point map too, written back into the observation
+    const auto fs = recover_focal_shift(points.data(), valid.data(), w, h);
+    shift_ = fs[1];
+    cam.intrinsics = {fs[0], 0, 0.5 * w - 0.5, 0, fs[0], 0.5 * h - 0.5, 0, 0, 1};
+  }
   if (std::isfinite(o_.desk_z)) {
     const double s = desk_scale(cam, points, valid);
     if (s > 0) scale_ = s;

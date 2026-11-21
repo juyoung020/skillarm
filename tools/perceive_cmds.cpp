@@ -132,11 +132,15 @@ int cmd_sam3(const std::vector<std::string>& a) {
 }
 
 int cmd_depth(const std::vector<std::string>& a) {
-  if (a.size() < 5) { std::printf("usage: skillarm depth <image> <fx> <fy> <cx> <cy> [--vitb] [--out depth.png]\n"); return 2; }
+  if (a.empty()) {
+    std::printf("usage: skillarm depth <image> [<fx> <fy> <cx> <cy>] [--vitb] [--out depth.png]  (no intrinsics: focal estimated)\n");
+    return 2;
+  }
   gpu_init();
   CameraObservation cam;
   if (!load_rgb(a[0], cam)) return 1;
-  cam.intrinsics = {std::stod(a[1]), 0, std::stod(a[3]), 0, std::stod(a[2]), std::stod(a[4]), 0, 0, 1};
+  const bool K = a.size() >= 5 && a[1].rfind("--", 0) != 0;
+  if (K) cam.intrinsics = {std::stod(a[1]), 0, std::stod(a[3]), 0, std::stod(a[2]), std::stod(a[4]), 0, 0, 1};
   MogeOptions o;
   o.onnx = std::string(SKILLARM_ROOT) + "/models/onnx/moge2/moge2_" + (has(a, "--vitb") ? "vitb" : "vits") + "_normal.onnx";
   o.width = cam.rgb.width;
@@ -146,7 +150,9 @@ int cmd_depth(const std::vector<std::string>& a) {
   std::printf("engine ready in %.1f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
   for (int pass = 0; pass < 3; ++pass) {
     if (!net.estimate(cam)) { std::printf("depth failed\n"); return 1; }
-    std::printf("pass %d: %.1f ms (scale %.4f, shift %+.4f)\n", pass, net.last_ms(), net.last_scale(), net.last_shift());
+    std::printf("pass %d: %.1f ms (scale %.4f, shift %+.4f, focal %.1f px%s)\n", pass, net.last_ms(), net.last_scale(),
+                net.last_shift(), cam.intrinsics[0], K ? "" : " estimated");
+    if (!K && pass < 2) cam.intrinsics[0] = 0;  // estimate again on the next pass
   }
   std::vector<float> d;
   for (float z : cam.depth_m) if (z > 0) d.push_back(z);
@@ -154,6 +160,50 @@ int cmd_depth(const std::vector<std::string>& a) {
   std::sort(d.begin(), d.end());
   std::printf("valid %.1f %%, depth min %.3f / median %.3f / max %.3f m\n", 100.0 * d.size() / cam.depth_m.size(), d.front(),
               d[d.size() / 2], d.back());
+  // --roi x0 y0 x1 y1 (repeatable): least-squares plane z = a x + b y + c through the box's 3-D points, reported as
+  // mean depth and RMS distance to the plane -- flat surfaces (wall, screen) should come out flat
+  for (size_t i = 0; i + 4 < a.size(); ++i) {
+    if (a[i] != "--roi") continue;
+    const int x0 = std::stoi(a[i + 1]), y0 = std::stoi(a[i + 2]), x1 = std::stoi(a[i + 3]), y1 = std::stoi(a[i + 4]);
+    const double fx = cam.intrinsics[0], fy = cam.intrinsics[4], cx = cam.intrinsics[2], cy = cam.intrinsics[5];
+    double S[3][3] = {}, r[3] = {}, zsum = 0;
+    std::vector<std::array<double, 3>> pts;
+    for (int v = y0; v < y1; ++v)
+      for (int u = x0; u < x1; ++u) {
+        const double z = cam.depth_m[size_t(v) * cam.rgb.width + u];
+        if (z <= 0) continue;
+        const double x = (u - cx) * z / fx, y = (v - cy) * z / fy, row[3] = {x, y, 1};
+        for (int p = 0; p < 3; ++p) {
+          for (int q = 0; q < 3; ++q) S[p][q] += row[p] * row[q];
+          r[p] += row[p] * z;
+        }
+        pts.push_back({x, y, z});
+        zsum += z;
+      }
+    if (pts.size() < 10) continue;
+    // solve S k = r (3x3, Cramer)
+    auto det = [](double m[3][3]) {
+      return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+             m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    };
+    const double D = det(S);
+    double k[3];
+    for (int c = 0; c < 3; ++c) {
+      double M[3][3];
+      for (int p = 0; p < 3; ++p)
+        for (int q = 0; q < 3; ++q) M[p][q] = q == c ? r[p] : S[p][q];
+      k[c] = det(M) / D;
+    }
+    const double nrm = std::sqrt(k[0] * k[0] + k[1] * k[1] + 1);
+    double ss = 0;
+    for (const auto& p : pts) {
+      const double e = (k[0] * p[0] + k[1] * p[1] + k[2] - p[2]) / nrm;
+      ss += e * e;
+    }
+    std::printf("roi [%d %d %d %d]: mean depth %.3f m, plane RMS %.1f mm, tilt from the image plane %.1f deg\n", x0, y0, x1,
+                y1, zsum / double(pts.size()), 1000 * std::sqrt(ss / double(pts.size())),
+                std::acos(1 / nrm) * 180 / 3.14159265358979);
+  }
   const auto out = flag_value(a, "--out", "");
   if (!out.empty()) {
     std::vector<uint16_t> mm(cam.depth_m.size());
