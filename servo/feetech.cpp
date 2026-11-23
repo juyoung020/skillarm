@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <ctime>
 #include <stdexcept>
 
 namespace skillarm::servo {
@@ -17,6 +18,11 @@ constexpr uint8_t kBroadcast = 0xFE;
 int64_t now_us() {
   return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
       .count();
+}
+int64_t mono_ns() {
+  timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return int64_t(ts.tv_sec) * 1000000000 + ts.tv_nsec;
 }
 }  // namespace
 
@@ -51,6 +57,7 @@ void Bus::send(uint8_t id, uint8_t inst, const std::vector<uint8_t>& params) {
   for (size_t i = 2; i < p.size(); ++i) sum += p[i];
   p.push_back(uint8_t(~sum));
   tcflush(fd_, TCIFLUSH);
+  rx_at_ = rx_n_ = 0;
   size_t off = 0;
   while (off < p.size()) {
     const ssize_t w = ::write(fd_, p.data() + off, p.size() - off);
@@ -58,12 +65,21 @@ void Bus::send(uint8_t id, uint8_t inst, const std::vector<uint8_t>& params) {
     if (w > 0) off += size_t(w);
   }
   tcdrain(fd_);
+  tx_ns_ = mono_ns();
 }
 
 bool Bus::byte(uint8_t& b, int64_t deadline_us) {
   for (;;) {
-    const ssize_t r = ::read(fd_, &b, 1);
-    if (r == 1) return true;
+    if (rx_at_ < rx_n_) {
+      b = rx_[rx_at_++];
+      return true;
+    }
+    const ssize_t r = ::read(fd_, rx_, sizeof rx_);  // whole USB packets at once, not a syscall per byte
+    if (r > 0) {
+      rx_at_ = 0;
+      rx_n_ = size_t(r);
+      continue;
+    }
     const int64_t left = deadline_us - now_us();
     if (left <= 0) return false;
     pollfd pf{fd_, POLLIN, 0};
