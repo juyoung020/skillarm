@@ -39,7 +39,7 @@
 //   * after a move, a joint held short of its target by gravity gets its goal nudged past the target (up to
 //     40 steps) until it arrives; the bias rides along in its next move and is dropped on stop or a large load;
 //   * torque limit during moves is 60 % (gripper 45 %);
-//   * thermal guard: a servo at --temp-park (60 C) or more aborts any motion, refuses new ones and parks the arm in
+//   * thermal guard: a servo at --temp-park (60 C) or more for 1 s (one-off bad reads are ignored) aborts any motion, refuses new ones and parks the arm in
 //     the rest pose joint by joint, then turns torque off ({"ev":"thermal"}, then "thermal_parked"); "clear" works
 //     again once every servo is 5 C below the limit. --temp-hard (70 C) is reported as the hard limit;
 //   * the gripper never aborts: its goal stays within 60 steps of where the jaws are, so closing on an object
@@ -510,7 +510,9 @@ class Server {
     int hot = 0, k_hot = -1;
     for (int k = 0; k < N; ++k)
       if (j_[k].ok && j_[k].temp > hot) { hot = j_[k].temp; k_hot = k; }
-    if (hot < kTempPark) return;
+    // a single bad bus read can report a wild temperature: act only when it stays at the limit for 1 s
+    if (hot < kTempPark || hot > 120) { hot_ticks_ = 0; return; }
+    if (++hot_ticks_ < 1000 / kTickMs) return;
     char buf[160];
     std::snprintf(buf, sizeof buf, "joint %d at %d C (%s %d C)", k_hot + 1, hot, hot >= kTempHard ? "hard limit" : "park limit",
                   hot >= kTempHard ? kTempHard : kTempPark);
@@ -641,6 +643,7 @@ class Server {
   std::string thermal_why_;
   int park_stage_ = -1;      // index into kPark while parking (-1: not parking)
   int park_tries_ = 0;
+  int hot_ticks_ = 0;        // consecutive ticks at or above kTempPark
   std::array<int, N> hold_ = {-1, -1, -1, -1, -1, -1};  // target a joint is held at after its last move (-1: none)
   std::array<int, N> hold_off_{};                         // hold correction: goal bias in steps
   std::mutex ev_m_;
