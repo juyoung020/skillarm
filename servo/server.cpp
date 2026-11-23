@@ -13,7 +13,7 @@
 //
 // TCP, one JSON object per line. Requests carry an optional "id" that is echoed in the reply.
 //   {"cmd":"info"}                              joint limits / offsets read from the servos, measured bus_hz
-//   {"cmd":"state"}                             pos, speed, load(0.1 %), volt, temp, torque, moving, t_sample (s)
+//   {"cmd":"state"}                             pos, speed, load(0.1 %), volt, temp (C), torque, moving, thermal, t_sample (s)
 //   {"cmd":"stream","hz":30}                    push {"ev":"state",...} lines ("hz":0 stops)
 //   {"cmd":"subscribe","every":1,"state":true}  switch this connection to SKW1 binary push (wire.hpp): every `every`-th
 //                                               bus read as a State message ("state":false: none, for clients that
@@ -39,6 +39,9 @@
 //   * after a move, a joint held short of its target by gravity gets its goal nudged past the target (up to
 //     40 steps) until it arrives; the bias rides along in its next move and is dropped on stop or a large load;
 //   * torque limit during moves is 60 % (gripper 45 %);
+//   * thermal guard: a servo at --temp-park (60 C) or more aborts any motion, refuses new ones and parks the arm in
+//     the rest pose joint by joint, then turns torque off ({"ev":"thermal"}, then "thermal_parked"); "clear" works
+//     again once every servo is 5 C below the limit. --temp-hard (70 C) is reported as the hard limit;
 //   * the gripper never aborts: its goal stays within 60 steps of where the jaws are, so closing on an object
 //     keeps a bounded squeeze and the move or servo stream carries on.
 // The PC checks the path against the desk in MuJoCo before sending a move (skillarm path-check).
@@ -89,6 +92,13 @@ constexpr int kHoldDeadband = 4;            // steps: hold correction acts beyon
 constexpr int kHoldBias = 40;               // steps: largest hold correction (~3.5 deg)
 constexpr int kServoStep = 45;              // max goal change per 20 ms tick (~4 deg)
 constexpr int kServoTimeoutMs = 500;        // no servo command for this long -> hold
+// Thermal guard: any servo at kTempPark degC or more -> abort what runs, refuse new motion, park the arm in the rest
+// pose one joint at a time (pan, roll, wrist, lift, elbow — the order that never lowers clearance from the poses used
+// on this desk), then torque off. kTempHard only changes the reported severity. --temp-park / --temp-hard set them.
+int kTempPark = 60, kTempHard = 70;
+constexpr int kParkOwner = -2;
+constexpr int kParkSpeed = 200;
+constexpr std::array<std::pair<int, int>, 5> kPark = {{{0, 2047}, {4, 2049}, {3, 2788}, {1, 878}, {2, 3137}}};
 
 using Items = std::vector<std::pair<uint8_t, std::vector<uint8_t>>>;
 
@@ -313,7 +323,7 @@ class Server {
       volt = std::max(volt, j.volt);
     }
     return {{"pos", pos}, {"speed", spd}, {"load", load}, {"temp", temp}, {"torque", tq}, {"volt", volt},
-            {"moving", m_.active}, {"servo", m_.active && m_.servo}, {"fault", fault_}, {"t_sample", sample_t_ * 1e-9}};
+            {"moving", m_.active}, {"servo", m_.active && m_.servo}, {"fault", fault_}, {"thermal", thermal_}, {"t_sample", sample_t_ * 1e-9}};
   }
 
   json torque(bool on, const std::vector<int>& joints) {
@@ -341,6 +351,7 @@ class Server {
   }
 
   json move(const json& targets, double speed, int owner) {
+    if (thermal_ && owner != kParkOwner) return {{"error", "thermal guard: " + thermal_why_ + " (parking / cooling; send clear when below " + std::to_string(kTempPark - 5) + " C)"}};
     if (speed <= 0) speed = 400;
     Motion m;
     m.owner = owner;
@@ -368,6 +379,7 @@ class Server {
 
   // continuous servo mode: {"cmd":"servo","targets":{"1":2047,...}}
   json servo(const json& targets, int owner) {
+    if (thermal_) return {{"error", "thermal guard: " + thermal_why_}};
     if (!fault_.empty()) return {{"error", "fault latched: " + fault_ + " (send {\"cmd\":\"clear\"} after checking the arm)"}};
     if (m_.active && !m_.servo) return {{"error", "a move is running"}};
     if (!m_.active) {
@@ -394,6 +406,13 @@ class Server {
   }
 
   void clear_fault() {
+    if (thermal_) {
+      int hot = 0;
+      for (const auto& j : j_) hot = std::max(hot, j.temp);
+      if (park_stage_ >= 0 || hot >= kTempPark - 5) return;  // still parking or still hot: stays latched
+      thermal_ = false;
+      thermal_why_.clear();
+    }
     fault_.clear();
     publish_flags();
   }
@@ -442,6 +461,8 @@ class Server {
   // one control tick: advance the motion and check it
   void tick() {
     sample();
+    thermal_tick();
+    if (park_stage_ >= 0) { park_tick(); return; }
     if (!m_.active) { hold_tick(); return; }
     if (m_.servo) { servo_tick(); return; }
     m_.t += kTickMs / 1000.0;
@@ -481,6 +502,67 @@ class Server {
         emit({{"ev", "move_done"}, {"settled", settled}, {"state", state()}});
       }
     }
+  }
+
+  // any joint at kTempPark or above: latch, abort, start parking
+  void thermal_tick() {
+    if (thermal_) return;
+    int hot = 0, k_hot = -1;
+    for (int k = 0; k < N; ++k)
+      if (j_[k].ok && j_[k].temp > hot) { hot = j_[k].temp; k_hot = k; }
+    if (hot < kTempPark) return;
+    char buf[160];
+    std::snprintf(buf, sizeof buf, "joint %d at %d C (%s %d C)", k_hot + 1, hot, hot >= kTempHard ? "hard limit" : "park limit",
+                  hot >= kTempHard ? kTempHard : kTempPark);
+    thermal_ = true;
+    thermal_why_ = buf;
+    fault_ = std::string("thermal: ") + buf;
+    std::fprintf(stderr, "thermal guard: %s -> parking\n", buf);
+    stop(fault_);
+    park_stage_ = 0;
+    park_tries_ = 0;
+    emit({{"ev", "thermal"}, {"reason", thermal_why_}, {"severity", hot >= kTempHard ? "hard" : "park"}, {"state", state()}});
+  }
+
+  // one park stage per joint; a stage is done when its joint is within 25 steps; torque off only once the arm rests
+  void park_tick() {
+    if (m_.active) {
+      if (m_.servo) { stop("thermal park"); return; }
+      // advance the running park move with the normal motion code
+      m_.t += kTickMs / 1000.0;
+      const double a = std::min(m_.t / m_.dur, 1.0);
+      Items items;
+      for (int k = 0; k < N; ++k) {
+        if (!m_.on[k]) continue;
+        const int goal = int(std::lround(m_.from[k] + (m_.to[k] - m_.from[k]) * a));
+        items.push_back({j_[k].id, {uint8_t(goal), uint8_t(goal >> 8)}});
+      }
+      write_goals(std::move(items));
+      if (a >= 1.0) {
+        bool settled = true;
+        for (int k = 0; k < N; ++k)
+          if (m_.on[k] && std::abs(j_[k].pos - int(m_.to[k])) > 25) settled = false;
+        if (settled || m_.t > m_.dur + 1.5) { m_.active = false; publish_flags(); }
+      }
+      return;
+    }
+    if (park_stage_ >= int(kPark.size())) {
+      const bool rested = std::abs(j_[2].pos - kPark[4].second) <= 25 && std::abs(j_[1].pos - kPark[3].second) <= 40;
+      if (rested) {
+        torque(false, {1, 2, 3, 4, 5, 6});
+        emit({{"ev", "thermal_parked"}, {"reason", thermal_why_}, {"state", state()}});
+        std::fprintf(stderr, "thermal guard: parked, torque off\n");
+      } else {
+        emit({{"ev", "thermal_park_incomplete"}, {"reason", thermal_why_}, {"state", state()}});
+        std::fprintf(stderr, "thermal guard: could not reach rest, holding with torque on\n");
+      }
+      park_stage_ = -1;
+      return;
+    }
+    const auto [k, to] = kPark[park_stage_];
+    if (std::abs(j_[k].pos - to) <= 25 || park_tries_ >= 3) { ++park_stage_; park_tries_ = 0; return; }
+    ++park_tries_;
+    (void)move(json{{std::to_string(k + 1), to}}, kParkSpeed, kParkOwner);
   }
 
   void servo_tick() {
@@ -555,6 +637,10 @@ class Server {
   Motion m_;
   int64_t sample_t_ = 0;
   std::string fault_;  // set when a move or servo mode aborted on a blockage; servo commands refused until "clear"
+  bool thermal_ = false;     // thermal guard latched: motion refused until cooled and cleared
+  std::string thermal_why_;
+  int park_stage_ = -1;      // index into kPark while parking (-1: not parking)
+  int park_tries_ = 0;
   std::array<int, N> hold_ = {-1, -1, -1, -1, -1, -1};  // target a joint is held at after its last move (-1: none)
   std::array<int, N> hold_off_{};                         // hold correction: goal bias in steps
   std::mutex ev_m_;
@@ -619,6 +705,8 @@ int main(int argc, char** argv) {
     if (k == "--lag-steps") kLagSteps = std::atoi(argv[i + 1]);
     if (k == "--lag-ticks") kLagTicks = std::atoi(argv[i + 1]);
     if (k == "--load-abort") kLoadAbort = std::atoi(argv[i + 1]);
+    if (k == "--temp-park") kTempPark = std::atoi(argv[i + 1]);
+    if (k == "--temp-hard") kTempHard = std::atoi(argv[i + 1]);
   }
   std::signal(SIGINT, [](int) { g_quit = true; });
   std::signal(SIGTERM, [](int) { g_quit = true; });
@@ -649,8 +737,8 @@ int main(int argc, char** argv) {
     bw.join();
     return 1;
   }
-  std::printf("skillarm-servo on :%d (%s), bus %d Hz, blockage guard: lag %d steps x %d ticks, load %d\n%s\n", port,
-              dev.c_str(), bus_hz, kLagSteps, kLagTicks, kLoadAbort, s.info().dump().c_str());
+  std::printf("skillarm-servo on :%d (%s), bus %d Hz, blockage guard: lag %d steps x %d ticks, load %d, thermal park %d C / hard %d C\n%s\n", port,
+              dev.c_str(), bus_hz, kLagSteps, kLagTicks, kLoadAbort, kTempPark, kTempHard, s.info().dump().c_str());
   std::fflush(stdout);
 
   // control thread: the 20 ms tick on the newest bus snapshot
