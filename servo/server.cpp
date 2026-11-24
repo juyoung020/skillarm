@@ -13,7 +13,7 @@
 //
 // TCP, one JSON object per line. Requests carry an optional "id" that is echoed in the reply.
 //   {"cmd":"info"}                              joint limits / offsets read from the servos, measured bus_hz
-//   {"cmd":"state"}                             pos, speed, load(0.1 %), volt, temp (C), torque, moving, thermal, t_sample (s)
+//   {"cmd":"state"}                             pos, speed, load(0.1 %), volt, temp (C, 5 s median), temp_raw, torque, moving, thermal, t_sample (s)
 //   {"cmd":"stream","hz":30}                    push {"ev":"state",...} lines ("hz":0 stops)
 //   {"cmd":"subscribe","every":1,"state":true}  switch this connection to SKW1 binary push (wire.hpp): every `every`-th
 //                                               bus read as a State message ("state":false: none, for clients that
@@ -39,7 +39,9 @@
 //   * after a move, a joint held short of its target by gravity gets its goal nudged past the target (up to
 //     40 steps) until it arrives; the bias rides along in its next move and is dropped on stop or a large load;
 //   * torque limit during moves is 60 % (gripper 45 %);
-//   * thermal guard: a servo at --temp-park (60 C) or more for 1 s (one-off bad reads are ignored) aborts any motion, refuses new ones and parks the arm in
+//   * thermal guard: temperatures are the 5 s median of the bus readings (bad reads, single or in bursts, are filtered;
+//     the raw byte is "temp_raw"); a servo whose filtered temperature stays at --temp-park (65 C) or more for 3 s
+//     aborts any motion, refuses new ones and parks the arm in
 //     the rest pose joint by joint, then turns torque off ({"ev":"thermal"}, then "thermal_parked"); "clear" works
 //     again once every servo is 5 C below the limit. --temp-hard (70 C) is reported as the hard limit;
 //   * the gripper never aborts: its goal stays within 60 steps of where the jaws are, so closing on an object
@@ -95,7 +97,11 @@ constexpr int kServoTimeoutMs = 500;        // no servo command for this long ->
 // Thermal guard: any servo at kTempPark degC or more -> abort what runs, refuse new motion, park the arm in the rest
 // pose one joint at a time (pan, roll, wrist, lift, elbow — the order that never lowers clearance from the poses used
 // on this desk), then torque off. kTempHard only changes the reported severity. --temp-park / --temp-hard set them.
-int kTempPark = 60, kTempHard = 70;
+int kTempPark = 65, kTempHard = 70;
+// Temperature filter: the guard and the reported "temp" use the median of the last kTempWin control ticks (5 s), so
+// bad bus reads (single or in bursts shorter than half the window) never reach the guard. The raw byte is "temp_raw".
+constexpr int kTempWin = 250;
+constexpr int kTempHoldMs = 3000;  // the filtered temperature must stay at the limit this long before parking
 constexpr int kParkOwner = -2;
 constexpr int kParkSpeed = 200;
 constexpr std::array<std::pair<int, int>, 5> kPark = {{{0, 2047}, {4, 2049}, {3, 2788}, {1, 878}, {2, 3137}}};
@@ -252,7 +258,25 @@ class BusWorker {
 struct Joint {
   uint8_t id;
   int lo = 0, hi = 4095, offset = 0;
-  int pos = -1, speed = 0, load = 0, temp = 0;
+  int pos = -1, speed = 0, load = 0, temp = 0;  // temp: filtered (median of kTempWin ticks)
+  int temp_raw = 0;
+  std::array<uint8_t, kTempWin> temp_hist{};
+  int temp_n = 0, temp_i = 0;
+  // one raw reading in; readings outside 1..100 C are dropped as bus errors
+  void temp_push(int raw) {
+    temp_raw = raw;
+    if (raw < 1 || raw > 100) return;
+    temp_hist[size_t(temp_i)] = uint8_t(raw);
+    temp_i = (temp_i + 1) % kTempWin;
+    if (temp_n < kTempWin) ++temp_n;
+    std::array<int, 101> cnt{};
+    for (int i = 0; i < temp_n; ++i) ++cnt[temp_hist[size_t(i)]];
+    int acc = 0;
+    for (int v = 0; v <= 100; ++v) {
+      acc += cnt[size_t(v)];
+      if (2 * acc >= temp_n) { temp = v; break; }
+    }
+  }
   double volt = 0;
   bool torque = false, ok = false;
 };
@@ -309,20 +333,21 @@ class Server {
       j_[k].pos = s.s.pos[k];
       j_[k].speed = s.s.speed[k];
       j_[k].load = s.s.load[k];
-      j_[k].temp = s.s.temp[k];
+      j_[k].temp_push(s.s.temp[k]);
       j_[k].volt = s.s.volt_dv / 10.0;
     }
   }
 
   json state() const {
     json pos = json::array(), spd = json::array(), load = json::array(), temp = json::array(), tq = json::array();
+    json temp_raw = json::array();
     double volt = 0;
     for (const auto& j : j_) {
-      pos.push_back(j.pos); spd.push_back(j.speed); load.push_back(j.load); temp.push_back(j.temp);
+      pos.push_back(j.pos); spd.push_back(j.speed); load.push_back(j.load); temp.push_back(j.temp); temp_raw.push_back(j.temp_raw);
       tq.push_back(j.torque);
       volt = std::max(volt, j.volt);
     }
-    return {{"pos", pos}, {"speed", spd}, {"load", load}, {"temp", temp}, {"torque", tq}, {"volt", volt},
+    return {{"pos", pos}, {"speed", spd}, {"load", load}, {"temp", temp}, {"temp_raw", temp_raw}, {"torque", tq}, {"volt", volt},
             {"moving", m_.active}, {"servo", m_.active && m_.servo}, {"fault", fault_}, {"thermal", thermal_}, {"t_sample", sample_t_ * 1e-9}};
   }
 
@@ -510,9 +535,9 @@ class Server {
     int hot = 0, k_hot = -1;
     for (int k = 0; k < N; ++k)
       if (j_[k].ok && j_[k].temp > hot) { hot = j_[k].temp; k_hot = k; }
-    // a single bad bus read can report a wild temperature: act only when it stays at the limit for 1 s
-    if (hot < kTempPark || hot > 120) { hot_ticks_ = 0; return; }
-    if (++hot_ticks_ < 1000 / kTickMs) return;
+    // j.temp is already the 5 s median (bad reads filtered out); it must also stay at the limit for kTempHoldMs
+    if (hot < kTempPark) { hot_ticks_ = 0; return; }
+    if (++hot_ticks_ < kTempHoldMs / kTickMs) return;
     char buf[160];
     std::snprintf(buf, sizeof buf, "joint %d at %d C (%s %d C)", k_hot + 1, hot, hot >= kTempHard ? "hard limit" : "park limit",
                   hot >= kTempHard ? kTempHard : kTempPark);
@@ -549,7 +574,8 @@ class Server {
       return;
     }
     if (park_stage_ >= int(kPark.size())) {
-      const bool rested = std::abs(j_[2].pos - kPark[4].second) <= 25 && std::abs(j_[1].pos - kPark[3].second) <= 40;
+      // rest = the arm lies folded: generous tolerance (gravity sag, limit clamps), then every servo is released
+      const bool rested = std::abs(j_[2].pos - kPark[4].second) <= 80 && std::abs(j_[1].pos - kPark[3].second) <= 80;
       if (rested) {
         torque(false, {1, 2, 3, 4, 5, 6});
         emit({{"ev", "thermal_parked"}, {"reason", thermal_why_}, {"state", state()}});
